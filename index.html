@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Whimsical Clay Studio</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <!-- Import map for Three.js and MediaPipe -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs"
+      }
+    }
+  </script>
+</head>
+<body>
+  <!-- Ghibli Background Elements -->
+  <div id="bg-grid"></div>
+  <div id="bg-floor"></div>
+
+  <!-- Container for Three.js -->
+  <div id="canvas-container"></div>
+
+  <!-- Background Music Control -->
+  <div id="music-control">
+    <button id="debug-toggle-btn" title="Toggle Debug Mode">🛠 Debug Off</button>
+    <button id="music-toggle-btn" title="Toggle Background Music">🔇 Music Off</button>
+    <audio id="bg-music" loop src="bg-music.mp3"></audio>
+  </div>
+
+  <!-- Debug Overlay Elements -->
+  <div id="debug-overlay" style="display: none; position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 100;">
+    <canvas id="debug-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></canvas>
+    <div id="debug-gesture-text" style="position: absolute; top: 80px; right: 20px; font-family: monospace; font-size: 20px; color: #ff3333; font-weight: bold; background: rgba(255,255,255,0.8); padding: 8px 12px; border-radius: 8px; border: 2px solid #ff3333;">Gesture: None</div>
+  </div>
+
+  <!-- Instruction Guide Panel -->
+  <div id="instructions-guide">
+    <h2>🎨 CAD Gesture Guide</h2>
+    <ul>
+      <li>🤚 <strong>Open Palm (Swipe):</strong> Rotate the 3D model</li>
+      <li>✊ <strong>Closed Fist (Hold):</strong> Freeze/Anchor the model in place</li>
+      <li>🤏 <strong>Pinch & Pull:</strong> Extrude/Sculpt geometry locally</li>
+      <li>🙌 <strong>Two Hands (Pinch & Move):</strong> Translate / Drag object in 3D</li>
+      <li>🖐🤲 <strong>Two Open Hands (Push/Pull):</strong> Scale object globally</li>
+    </ul>
+    <p class="tip">Tip: Perform slow, deliberate gestures for precise modeling.</p>
+  </div>
+  
+  <!-- Webcam feed (hidden from UI, used for tracking) -->
+  <video id="webcam" autoplay playsinline></video>
+  
+  <!-- Cat Companion AI Agent -->
+  <div id="companion-ui">
+    <div id="cat-character" style="cursor: pointer; text-align: center;">
+      <!-- Illustrative Line-Art Cat Style SVG -->
+      <svg viewBox="0 0 100 120" width="100" height="120" xmlns="http://www.w3.org/2000/svg">
+        <!-- Body base -->
+        <path d="M20,60 L25,10 L45,35 L55,35 L75,10 L80,60 C90,70 95,90 85,115 L15,115 C5,90 10,70 20,60 Z" fill="#ebdfce" stroke="#7b8b6f" stroke-width="2.5" stroke-linejoin="round"/>
+        <!-- Eyes -->
+        <!-- Left Eye (Always Open) -->
+        <circle cx="35" cy="55" r="8" fill="#fff" stroke="#7b8b6f" stroke-width="2"/>
+        <circle cx="37" cy="55" r="3" fill="#7b8b6f"/>
+        <circle cx="38" cy="54" r="1" fill="#fff"/>
+        
+        <!-- Right Eye (Open State) -->
+        <g id="right-eye-open">
+          <circle cx="65" cy="55" r="8" fill="#fff" stroke="#7b8b6f" stroke-width="2"/>
+          <circle cx="63" cy="55" r="3" fill="#7b8b6f"/>
+          <circle cx="64" cy="54" r="1" fill="#fff"/>
+        </g>
+        <!-- Right Eye (Wink State - Hidden Default) -->
+        <path id="right-eye-wink" d="M57,55 Q65,48 73,55" stroke="#7b8b6f" stroke-width="2.5" fill="none" stroke-linecap="round" style="display: none;"/>
+
+        <!-- Snout/Mouth -->
+        <path d="M45,70 C48,76 52,76 55,70" stroke="#7b8b6f" stroke-width="2" fill="none" stroke-linecap="round"/>
+        <!-- Whiskers -->
+        <path d="M22,65 L5,60 M20,70 L5,70 M22,75 L8,80 M78,65 L95,60 M80,70 L95,70 M78,75 L92,80" stroke="#7b8b6f" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <div id="ai-name-badge" style="font-weight: bold; color: #5a6652; background: rgba(255,255,255,0.85); border: 1px solid #7b8b6f; border-radius: 12px; padding: 2px 8px; margin-top: -10px; font-size: 13px; position: relative; z-index: 10; display: inline-block;">🐾 Boba</div>
+    </div>
+    <div id="chat-interface">
+      <div id="cat-dialogue">Meow~ I'm Boba, ready to refine your design!</div>
+      
+      <!-- Chat History Container (Hidden by default) -->
+      <div id="chat-history-container" style="display: none;">
+        <ul id="chat-history"></ul>
+      </div>
+
+      <div id="chat-controls">
+        <button id="toggle-history-btn" title="Toggle Chat History">📋</button>
+        <input type="text" id="chat-input" placeholder="e.g. 'Smooth the corners'..." autocomplete="off">
+        <button id="mic-btn" title="Hold to use voice command">🎤</button>
+        <button id="send-btn">➔</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
