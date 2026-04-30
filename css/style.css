@@ -1,33 +1,168 @@
+/* ============================================================
+   THEME VARIABLES — switched via body[data-workshop=...]
+   ============================================================ */
+:root {
+  --bg-color: #f8eedb;          /* main page bg */
+  --accent: #7b8b6f;            /* primary lines/borders */
+  --accent-text: #2b332b;       /* dark text */
+  --panel-bg: rgba(248, 238, 219, 0.95);
+  --panel-text: #2b332b;
+  --grid-color: rgba(123, 139, 111, 0.3);
+  --grid-size: 60px;
+  --floor-color: #d1d8c1;
+  --floor-pattern: linear-gradient(45deg, rgba(248, 238, 219, 0.5) 25%, transparent 25%, transparent 75%, rgba(248, 238, 219, 0.5) 75%, rgba(248, 238, 219, 0.5)),
+                   linear-gradient(45deg, rgba(248, 238, 219, 0.5) 25%, transparent 25%, transparent 75%, rgba(248, 238, 219, 0.5) 75%, rgba(248, 238, 219, 0.5));
+  --floor-size: 40px 40px;
+  --floor-position: 0 0, 20px 20px;
+  --decor-bg: transparent;
+  --neon-glow: none;
+}
+
+/* METAL WORKSHOP — cyberpunk */
+body[data-workshop="metal"] {
+  --bg-color: #16181d;
+  --accent: #00e5ff;
+  --accent-text: #ffffff;
+  --panel-bg: rgba(28, 32, 40, 0.92);
+  --panel-text: #e0f7ff;
+  --grid-color: rgba(0, 229, 255, 0.18);
+  --grid-size: 40px;
+  --floor-color: #1a1d24;
+  --floor-pattern: repeating-linear-gradient(45deg, rgba(0, 229, 255, 0.06) 0 2px, transparent 2px 22px),
+                   repeating-linear-gradient(-45deg, rgba(255, 0, 200, 0.05) 0 2px, transparent 2px 22px);
+  --floor-size: auto, auto;
+  --floor-position: 0 0, 0 0;
+  --decor-bg: radial-gradient(ellipse at 20% 10%, rgba(255, 0, 200, 0.18), transparent 40%),
+              radial-gradient(ellipse at 80% 90%, rgba(0, 229, 255, 0.18), transparent 50%);
+  --neon-glow: 0 0 6px rgba(0, 229, 255, 0.6);
+}
+
+/* WOOD WORKSHOP — warm cozy carpentry */
+body[data-workshop="wood"] {
+  --bg-color: #f3e2c5;
+  --accent: #8b5a2b;
+  --accent-text: #3d2817;
+  --panel-bg: rgba(252, 240, 220, 0.95);
+  --panel-text: #3d2817;
+  --grid-color: rgba(139, 90, 43, 0.22);
+  --grid-size: 80px;
+  --floor-color: #c89967;
+  --floor-pattern: repeating-linear-gradient(90deg, rgba(101, 67, 33, 0.25) 0 1px, transparent 1px 60px),
+                   repeating-linear-gradient(0deg, rgba(101, 67, 33, 0.18) 0 2px, transparent 2px 18px);
+  --floor-size: auto, auto;
+  --floor-position: 0 0, 0 0;
+  --decor-bg: radial-gradient(ellipse at 50% 100%, rgba(139, 90, 43, 0.18), transparent 60%);
+  --neon-glow: none;
+}
+
+/* CROCHET WORKSHOP — cottagecore coquette */
+body[data-workshop="crochet"] {
+  --bg-color: #fceeee;
+  --accent: #d28aae;
+  --accent-text: #6b3a52;
+  --panel-bg: rgba(255, 245, 248, 0.95);
+  --panel-text: #6b3a52;
+  --grid-color: rgba(210, 138, 174, 0.22);
+  --grid-size: 50px;
+  --floor-color: #f6dbe0;
+  --floor-pattern: radial-gradient(circle at 10px 10px, rgba(210, 138, 174, 0.45) 3px, transparent 4px),
+                   radial-gradient(circle at 30px 30px, rgba(255, 255, 255, 0.7) 2px, transparent 3px);
+  --floor-size: 40px 40px, 40px 40px;
+  --floor-position: 0 0, 20px 20px;
+  --decor-bg: radial-gradient(ellipse at 15% 20%, rgba(255, 220, 230, 0.6), transparent 40%),
+              radial-gradient(ellipse at 85% 30%, rgba(255, 240, 200, 0.5), transparent 40%);
+  --neon-glow: none;
+}
+
 body {
   margin: 0;
   overflow: hidden;
-  background-color: #f8eedb; /* Ghibli cream background */
+  background-color: var(--bg-color);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  transition: background-color 0.4s ease;
+}
+
+/* ============================================================
+   WORKSHOP TOP BAR
+   ============================================================ */
+#workshop-bar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 56px;
+  z-index: 200;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 16px;
+  background: var(--panel-bg);
+  border-bottom: 2px solid var(--accent);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  transition: background-color 0.4s ease, border-color 0.4s ease;
+}
+#workshop-bar-inner {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  justify-content: center;
+}
+#workshop-bar-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.ws-btn {
+  background: transparent;
+  border: 1.5px solid var(--accent);
+  color: var(--panel-text);
+  border-radius: 10px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+.ws-btn:hover {
+  background: var(--accent);
+  color: var(--bg-color);
+}
+.ws-btn.active {
+  background: var(--accent);
+  color: var(--bg-color);
+  box-shadow: var(--neon-glow);
 }
 
 #bg-grid {
   position: absolute;
   top: 0; left: 0; width: 100vw; height: 100vh;
-  /* Thin sage green geometric grid on the background */
   background-image: 
-    linear-gradient(to right, rgba(123, 139, 111, 0.3) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(123, 139, 111, 0.3) 1px, transparent 1px);
-  background-size: 60px 60px; /* Large grid squares */
+    linear-gradient(to right, var(--grid-color) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-color) 1px, transparent 1px);
+  background-size: var(--grid-size) var(--grid-size);
   z-index: 0;
+  transition: background-color 0.4s ease;
+}
+
+#bg-decor {
+  position: absolute;
+  top: 0; left: 0; width: 100vw; height: 100vh;
+  pointer-events: none;
+  background: var(--decor-bg);
+  z-index: 0;
+  transition: background 0.6s ease;
 }
 
 #bg-floor {
   position: absolute;
   bottom: 0; left: 0; width: 100vw; height: 15vh;
-  /* Sage green and cream gingham pattern floor */
-  background-color: #d1d8c1;
-  background-image: 
-    linear-gradient(45deg, rgba(248, 238, 219, 0.5) 25%, transparent 25%, transparent 75%, rgba(248, 238, 219, 0.5) 75%, rgba(248, 238, 219, 0.5)), 
-    linear-gradient(45deg, rgba(248, 238, 219, 0.5) 25%, transparent 25%, transparent 75%, rgba(248, 238, 219, 0.5) 75%, rgba(248, 238, 219, 0.5));
-  background-size: 40px 40px;
-  background-position: 0 0, 20px 20px;
+  background-color: var(--floor-color);
+  background-image: var(--floor-pattern);
+  background-size: var(--floor-size);
+  background-position: var(--floor-position);
   z-index: 0;
-  border-top: 3px solid rgba(123, 139, 111, 0.8);
+  border-top: 3px solid var(--accent);
+  transition: background-color 0.4s ease;
 }
 
 #canvas-container {
@@ -58,22 +193,23 @@ body {
 
 #instructions-guide {
   position: absolute;
-  top: 20px;
+  top: 76px;
   right: 20px;
   z-index: 10;
   width: 250px;
-  background: rgba(248, 238, 219, 0.95);
-  border: 1.5px solid #7b8b6f;
+  background: var(--panel-bg);
+  border: 1.5px solid var(--accent);
   padding: 15px 20px;
   border-radius: 12px;
   box-shadow: 0 4px 15px rgba(0,0,0,0.08);
-  color: #333;
+  color: var(--panel-text);
+  transition: background-color 0.4s ease, border-color 0.4s ease, color 0.4s ease;
 }
 #instructions-guide h2 {
   font-size: 16px;
   margin-top: 0;
-  color: #2b332b;
-  border-bottom: 2px solid #7b8b6f;
+  color: var(--accent-text);
+  border-bottom: 2px solid var(--accent);
   padding-bottom: 5px;
 }
 #instructions-guide ul {
@@ -88,7 +224,7 @@ body {
 }
 #instructions-guide .tip {
   font-size: 12px;
-  color: #7b8b6f;
+  color: var(--accent);
   font-style: italic;
   margin-bottom: 0;
 }
@@ -106,7 +242,6 @@ body {
 
 #cat-character {
   z-index: 2;
-  /* Hover effect for responsiveness */
   transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 #cat-character:hover {
@@ -114,20 +249,21 @@ body {
 }
 
 #chat-interface {
-  background: #f8eedb;
-  border: 2px solid #7b8b6f; /* Sage outline */
-  border-radius: 15px 15px 15px 0px; /* Chat bubble looking shape */
+  background: var(--panel-bg);
+  border: 2px solid var(--accent);
+  border-radius: 15px 15px 15px 0px;
   padding: 15px 20px;
-  box-shadow: 2px 4px 0 rgba(123, 139, 111, 0.2);
+  box-shadow: 2px 4px 0 rgba(0, 0, 0, 0.1);
   margin-bottom: 20px;
   width: 320px;
   display: flex;
   flex-direction: column;
+  transition: background-color 0.4s ease, border-color 0.4s ease;
 }
 
 #chat-history-container {
-  background: #fff;
-  border: 1px solid rgba(123, 139, 111, 0.3);
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--accent);
   border-radius: 8px;
   max-height: 150px;
   overflow-y: auto;
@@ -148,21 +284,22 @@ body {
 }
 
 .history-user {
-  color: #555;
+  color: var(--panel-text);
   font-style: italic;
   text-align: right;
   margin-left: 20px;
+  opacity: 0.75;
 }
 
 .history-cat {
-  color: #2b332b;
+  color: var(--accent-text);
   text-align: left;
   margin-right: 20px;
 }
 
 #cat-dialogue {
   font-size: 14px;
-  color: #2b332b;
+  color: var(--accent-text);
   margin-bottom: 12px;
   font-family: inherit;
   font-weight: 500;
@@ -176,33 +313,33 @@ body {
 }
 
 #chat-input {
-  border: 1.5px solid #7b8b6f;
-  background: #fff;
+  border: 1.5px solid var(--accent);
+  background: rgba(255, 255, 255, 0.85);
   border-radius: 8px;
   padding: 6px 10px;
   flex-grow: 1;
   font-family: inherit;
   font-size: 13px;
   outline: none;
-  color: #333;
+  color: var(--panel-text);
 }
 #chat-input:focus {
-  box-shadow: 0 0 0 2px rgba(123, 139, 111, 0.4);
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 #toggle-history-btn, #mic-btn, #send-btn {
-  background: #fff;
-  border: 1.5px solid #7b8b6f;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1.5px solid var(--accent);
   border-radius: 8px;
   cursor: pointer;
   padding: 5px 10px;
-  color: #2b332b;
+  color: var(--panel-text);
   font-size: 14px;
   transition: all 0.2s;
 }
 #toggle-history-btn:hover, #mic-btn:hover, #send-btn:hover {
-  background: #7b8b6f;
-  color: #fff;
+  background: var(--accent);
+  color: var(--bg-color);
 }
 
 #mic-btn.recording {
@@ -220,44 +357,212 @@ body {
   font-size: 14px;
 }
 
-/* Background Music Toggle */
-#music-control {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  z-index: 100;
-}
-#music-toggle-btn {
-  background: #fff;
-  border: 1.5px solid #7b8b6f;
+/* Top-Right Action Buttons (inside workshop bar) */
+#workshop-bar-actions button {
+  background: rgba(255, 255, 255, 0.6);
+  border: 1.5px solid var(--accent);
   border-radius: 8px;
   cursor: pointer;
-  padding: 8px 12px;
-  color: #2b332b;
-  font-size: 14px;
+  padding: 6px 10px;
+  color: var(--panel-text);
+  font-size: 12px;
   font-family: inherit;
   transition: all 0.2s;
-  box-shadow: 0 4px 10px rgba(0,0,0,0.1);
 }
-#music-toggle-btn:hover {
-  background: #7b8b6f;
-  color: #fff;
+#workshop-bar-actions button:hover {
+  background: var(--accent);
+  color: var(--bg-color);
 }
-
+#workshop-bar-actions button.active {
+  background: var(--accent);
+  color: var(--bg-color);
+  box-shadow: var(--neon-glow);
+}
+body[data-workshop="metal"] #workshop-bar-actions button { background: rgba(0,0,0,0.3); }
+#hands-toggle-btn.disabled {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+#scan-btn {
+  border-color: #d28aae !important;
+  color: #d28aae !important;
+}
+#scan-btn:hover {
+  background: #d28aae !important;
+  color: #fff !important;
+}
 #debug-toggle-btn {
-  background: #fff;
-  border: 1.5px solid #ff6b6b;
-  border-radius: 8px;
-  cursor: pointer;
-  padding: 8px 12px;
-  color: #ff6b6b;
-  font-size: 14px;
-  font-family: inherit;
-  transition: all 0.2s;
-  box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-  margin-right: 10px;
+  border-color: #ff6b6b !important;
+  color: #ff6b6b !important;
 }
 #debug-toggle-btn:hover, #debug-toggle-btn.active {
-  background: #ff6b6b;
-  color: #fff;
+  background: #ff6b6b !important;
+  color: #fff !important;
+}
+
+/* ============================================================
+   SCAN MODAL
+   ============================================================ */
+#scan-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+}
+#scan-modal.open { display: flex; }
+#scan-modal-inner {
+  background: var(--panel-bg);
+  border: 2px solid var(--accent);
+  border-radius: 16px;
+  padding: 22px;
+  width: 600px;
+  max-width: 95vw;
+  max-height: 90vh;
+  overflow-y: auto;
+  color: var(--panel-text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+#scan-modal h2 { margin: 0 0 8px; font-size: 20px; color: var(--accent-text); }
+#scan-modal p { font-size: 13px; line-height: 1.4; margin: 4px 0 12px; }
+#scan-video-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4/3;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1.5px solid var(--accent);
+}
+#scan-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+#scan-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  opacity: 0.7;
+}
+#scan-controls {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+#scan-controls button {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1.5px solid var(--accent);
+  color: var(--panel-text);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+#scan-controls button:hover {
+  background: var(--accent);
+  color: var(--bg-color);
+}
+#scan-controls button.primary {
+  background: var(--accent);
+  color: var(--bg-color);
+}
+#scan-status {
+  font-size: 12px;
+  color: var(--accent);
+  margin-top: 8px;
+  font-style: italic;
+}
+#scan-threshold-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+#scan-threshold-row input { flex: 1; }
+
+/* ============================================================
+   BLEND MODE PANEL (after placing a shape)
+   ============================================================ */
+#blend-panel {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 250;
+  background: var(--panel-bg);
+  border: 1.5px solid var(--accent);
+  border-radius: 12px;
+  padding: 14px 18px;
+  width: 360px;
+  color: var(--panel-text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  display: none;
+}
+#blend-panel.open { display: block; }
+#blend-panel h3 { margin: 0 0 10px; font-size: 14px; color: var(--accent-text); }
+#blend-panel label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+#blend-panel input[type=range] { width: 100%; }
+#blend-panel .row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  margin-bottom: 8px;
+}
+#blend-panel .btns {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+#blend-panel .btns button {
+  flex: 1;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1.5px solid var(--accent);
+  background: rgba(255,255,255,0.85);
+  color: var(--panel-text);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+#blend-panel .btns button.primary {
+  background: var(--accent);
+  color: var(--bg-color);
+}
+#blend-panel .btns button:hover { filter: brightness(1.1); }
+#blend-panel .gesture-hint {
+  font-size: 11px;
+  color: var(--accent);
+  font-style: italic;
+  margin-top: 6px;
+}
+
+/* Active placement-mode highlight on the palette ➕ buttons */
+.pal-add.active {
+  background: var(--accent) !important;
+  color: var(--bg-color) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 12px rgba(0, 0, 0, 0.15);
+  animation: pulse-add 1.4s infinite ease-in-out;
+}
+@keyframes pulse-add {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
 }
