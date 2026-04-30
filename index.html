@@ -15,20 +15,31 @@
     }
   </script>
 </head>
-<body>
+<body data-workshop="default">
+  <!-- Workshop Mode Top Bar -->
+  <div id="workshop-bar">
+    <div id="workshop-bar-inner">
+      <button class="ws-btn active" data-workshop="default">🎨 3D Studio</button>
+      <button class="ws-btn" data-workshop="metal">⚙️ Metal Workshop</button>
+      <button class="ws-btn" data-workshop="wood">🪵 Wood Workshop</button>
+      <button class="ws-btn" data-workshop="crochet">🧶 Crochet Workshop</button>
+    </div>
+    <div id="workshop-bar-actions">
+      <button id="scan-btn" title="Scan a real object with your camera">📷 Scan</button>
+      <button id="hands-toggle-btn" title="Toggle hand tracking">✋ Hands On</button>
+      <button id="debug-toggle-btn" title="Toggle Debug Mode">🛠 Debug Off</button>
+      <button id="music-toggle-btn" title="Toggle Background Music">🔇 Music Off</button>
+      <audio id="bg-music" loop src="bg-music.mp3"></audio>
+    </div>
+  </div>
+
   <!-- Ghibli Background Elements -->
   <div id="bg-grid"></div>
   <div id="bg-floor"></div>
+  <div id="bg-decor"></div>
 
   <!-- Container for Three.js -->
   <div id="canvas-container"></div>
-
-  <!-- Background Music Control -->
-  <div id="music-control">
-    <button id="debug-toggle-btn" title="Toggle Debug Mode">🛠 Debug Off</button>
-    <button id="music-toggle-btn" title="Toggle Background Music">🔇 Music Off</button>
-    <audio id="bg-music" loop src="bg-music.mp3"></audio>
-  </div>
 
   <!-- Debug Overlay Elements -->
   <div id="debug-overlay" style="display: none; position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 100;">
