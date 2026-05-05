@@ -33,6 +33,50 @@
     </div>
   </div>
 
+  <!-- Splice-style Modeling Toolbar -->
+  <div id="splice-toolbar-wrap">
+    <div id="splice-toolbar" role="toolbar" aria-label="Modeling Toolbar">
+      <button class="splice-icon-btn" id="splice-add-btn" title="Add current shape" aria-label="Add shape">＋</button>
+      <button class="splice-icon-btn" id="splice-duplicate-btn" title="Duplicate last placed shape" aria-label="Duplicate last shape">⧉</button>
+      <span class="splice-divider" aria-hidden="true"></span>
+      <button class="splice-icon-btn" data-quick-command="reset" title="Reset object" aria-label="Reset">✧</button>
+      <button class="splice-icon-btn" data-quick-command="wireframe" title="Toggle wireframe" aria-label="Wireframe">◻</button>
+
+      <div class="splice-shape-picker">
+        <button id="splice-shape-trigger" class="splice-icon-btn splice-shape-trigger" title="Shape menu" aria-haspopup="menu" aria-expanded="false" aria-controls="splice-shape-menu">
+          ⬡
+          <span id="splice-shape-label">Sphere</span>
+          <span class="splice-caret">▾</span>
+        </button>
+        <div id="splice-shape-menu" role="menu" aria-label="Shape list">
+          <button class="splice-shape-item" role="menuitem" data-shape="cube">⬡ Cube</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="roundedcube">▣ Rounded Cube</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="sphere">◉ Sphere</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="cylinder">⬢ Cylinder</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="beveledcylinder">◍ Beveled Cylinder</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="torus">◎ Torus</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="helix">⟲ Helix</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="cone">△ Cone</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="pyramid">◇ Pyramid</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="icosahedron">⬟ Icosahedron</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="dodecahedron">⬢ Dodecahedron</button>
+          <button class="splice-shape-item" role="menuitem" data-shape="torusknot">⟠ Torus Knot</button>
+        </div>
+      </div>
+
+      <span class="splice-divider" aria-hidden="true"></span>
+
+      <button class="splice-mode-btn active" data-mode="select" title="Select / Navigate mode" aria-label="Select mode">↖</button>
+      <button class="splice-mode-btn" data-mode="sculpt" title="Sculpt mode" aria-label="Sculpt mode">✋</button>
+      <button class="splice-mode-btn" data-mode="form" title="Form mode" aria-label="Form mode">✍</button>
+      <button class="splice-mode-btn" data-mode="detail" title="Detail mode" aria-label="Detail mode">◌</button>
+      <button class="splice-mode-btn" data-mode="freeze" title="Freeze mode" aria-label="Freeze mode">✊</button>
+      <button class="splice-mode-btn" data-mode="add" title="Add mode" aria-label="Add mode">▷</button>
+    </div>
+    <div id="mode-hint">Mode: Select · gesture adaptive</div>
+    <div id="command-status" aria-live="polite">Command ready.</div>
+  </div>
+
   <!-- Ghibli Background Elements -->
   <div id="bg-grid"></div>
   <div id="bg-floor"></div>
@@ -45,6 +89,7 @@
   <div id="debug-overlay" style="display: none; position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 100;">
     <canvas id="debug-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></canvas>
     <div id="debug-gesture-text" style="position: absolute; top: 80px; right: 20px; font-family: monospace; font-size: 20px; color: #ff3333; font-weight: bold; background: rgba(255,255,255,0.8); padding: 8px 12px; border-radius: 8px; border: 2px solid #ff3333;">Gesture: None</div>
+    <div id="debug-command-text" style="position: absolute; top: 130px; right: 20px; font-family: monospace; font-size: 16px; color: #2b332b; font-weight: bold; background: rgba(255,255,255,0.85); padding: 8px 12px; border-radius: 8px; border: 2px solid #7b8b6f;">Command: Idle</div>
   </div>
 
   <!-- Instruction Guide Panel -->

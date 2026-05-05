@@ -28,17 +28,145 @@ const raycaster = new THREE.Raycaster();
 // ============================================================
 // 2. SHAPES & MESH
 // ============================================================
+const SHAPE_LABELS = {
+    sphere: 'Sphere',
+    cube: 'Cube',
+    roundedcube: 'Rounded Cube',
+    cylinder: 'Cylinder',
+    beveledcylinder: 'Beveled Cylinder',
+    cone: 'Cone',
+    torus: 'Torus',
+    helix: 'Helix',
+    pyramid: 'Pyramid',
+    icosahedron: 'Icosahedron',
+    dodecahedron: 'Dodecahedron',
+    torusknot: 'Torus Knot',
+};
+
+function makeRoundedCubeGeometry(size = 1.5, radius = 0.22, segments = 10) {
+    const g = new THREE.BoxGeometry(size, size, size, segments, segments, segments);
+    const p = g.attributes.position;
+    const innerHalf = size * 0.5 - radius;
+    const v = new THREE.Vector3();
+    const inner = new THREE.Vector3();
+    const delta = new THREE.Vector3();
+    for (let i = 0; i < p.count; i++) {
+        v.fromBufferAttribute(p, i);
+        inner.set(
+            THREE.MathUtils.clamp(v.x, -innerHalf, innerHalf),
+            THREE.MathUtils.clamp(v.y, -innerHalf, innerHalf),
+            THREE.MathUtils.clamp(v.z, -innerHalf, innerHalf),
+        );
+        delta.copy(v).sub(inner);
+        if (delta.lengthSq() < 1e-6) {
+            const ax = Math.abs(v.x), ay = Math.abs(v.y), az = Math.abs(v.z);
+            if (ax >= ay && ax >= az) delta.set(Math.sign(v.x) || 1, 0, 0);
+            else if (ay >= ax && ay >= az) delta.set(0, Math.sign(v.y) || 1, 0);
+            else delta.set(0, 0, Math.sign(v.z) || 1);
+        }
+        delta.normalize().multiplyScalar(radius);
+        p.setXYZ(i, inner.x + delta.x, inner.y + delta.y, inner.z + delta.z);
+    }
+    p.needsUpdate = true;
+    g.computeVertexNormals();
+    return g;
+}
+
+function makeBeveledCylinderGeometry(radius = 0.82, height = 2, bevel = 0.18, radialSeg = 32, heightSeg = 14) {
+    const g = new THREE.CylinderGeometry(radius, radius, height, radialSeg, heightSeg, false);
+    const p = g.attributes.position;
+    const halfH = height * 0.5;
+    const innerRad = Math.max(0.05, radius - bevel);
+    const innerHalfH = Math.max(0.05, halfH - bevel);
+    const v = new THREE.Vector3();
+    const inner = new THREE.Vector3();
+    const delta = new THREE.Vector3();
+    const radial = new THREE.Vector3();
+    for (let i = 0; i < p.count; i++) {
+        v.fromBufferAttribute(p, i);
+        radial.set(v.x, 0, v.z);
+        const radialLen = radial.length();
+        if (radialLen > 1e-6) radial.multiplyScalar(1 / radialLen);
+        else radial.set(1, 0, 0);
+        inner.copy(v);
+        inner.y = THREE.MathUtils.clamp(v.y, -innerHalfH, innerHalfH);
+        if (radialLen > innerRad) {
+            inner.x = radial.x * innerRad;
+            inner.z = radial.z * innerRad;
+        }
+        delta.copy(v).sub(inner);
+        if (delta.lengthSq() < 1e-6) delta.copy(radial);
+        delta.normalize().multiplyScalar(bevel);
+        p.setXYZ(i, inner.x + delta.x, inner.y + delta.y, inner.z + delta.z);
+    }
+    p.needsUpdate = true;
+    g.computeVertexNormals();
+    return g;
+}
+
 const SHAPES = {
     sphere:   () => new THREE.SphereGeometry(1, 32, 24),
     cube:     () => new THREE.BoxGeometry(1.5, 1.5, 1.5, 10, 10, 10),
+    roundedcube: () => makeRoundedCubeGeometry(),
     cylinder: () => new THREE.CylinderGeometry(0.8, 0.8, 2, 32, 10),
+    beveledcylinder: () => makeBeveledCylinderGeometry(),
     cone:     () => new THREE.ConeGeometry(1, 2, 32, 10),
     torus:    () => new THREE.TorusGeometry(0.8, 0.35, 20, 40),
+    helix:    () => new THREE.TorusKnotGeometry(0.7, 0.16, 180, 28, 2, 7),
+    pyramid:  () => new THREE.ConeGeometry(1, 1.8, 4, 1),
+    icosahedron: () => new THREE.IcosahedronGeometry(1.05, 0),
+    dodecahedron: () => new THREE.DodecahedronGeometry(1.0, 0),
+    torusknot: () => new THREE.TorusKnotGeometry(0.76, 0.2, 150, 20, 3, 5),
 };
 
 let currentShape = 'sphere';
 let mesh = null, wireframe = null;
+let shapeLabel = null;
+let shapeItems = [];
 const material = new THREE.MeshStandardMaterial({ color: 0xa8c3e6, roughness: 0.35, metalness: 0.1, flatShading: false, side: THREE.DoubleSide });
+const selectionState = {
+    kind: 'none',
+    active: false,
+    pointLocal: new THREE.Vector3(),
+    normalLocal: new THREE.Vector3(0, 0, 1),
+    radius: 0.55,
+    logicalVertexIds: new Set(),
+    boundaryVertexIds: new Set(),
+    pulseUntil: 0,
+};
+const interactionState = {
+    mode: 'select',
+    selection: selectionState,
+    activeOperation: null,
+    placementSpec: { shape: 'sphere', scale: 0.3, depth: 0.5, blendStrength: 0.7, variant: 'default' },
+    lastAddSpec: null,
+};
+const topologyCache = {
+    logicalVertices: [],
+    bufferToLogical: [],
+    adjacency: [],
+    version: 0,
+};
+const GESTURE_TUNING = {
+    modeLockMs: 120000,
+    dragPixelDeadZone: 12,
+    dragStep: 0.018,
+    dragScale: 0.0024,
+    axisBiasRatio: 1.35,
+    sculptDepthDeadZone: 0.007,
+    sculptDepthStep: 0.012,
+    sculptDepthScale: 0.75,
+    formDepthDeadZone: 0.010,
+    formDepthStep: 0.020,
+    formDepthScale: 1.0,
+    bevelDepthDeadZone: 0.008,
+    bevelDepthStep: 0.014,
+    bevelDepthScale: 0.75,
+    formNormalSnap: 1.0,
+    detailNormalSnap: 1.0,
+    sculptNormalSnap: 0.72,
+};
+let modeLockUntil = 0;
 
 // ---- Crochet shader patch ---------------------------------------------------
 // Procedural V-stitch pattern in OBJECT space (so the texture is locked to the
@@ -166,9 +294,15 @@ function setShape(name) {
     const geo = SHAPES[name]().toNonIndexed();
     geo.computeVertexNormals();
     mesh = new THREE.Mesh(geo, material);
+    selectionState.active = false;
+    selectionState.kind = 'none';
+    selectionState.logicalVertexIds = new Set();
+    selectionState.boundaryVertexIds = new Set();
     refreshWireframe();
+    rebuildTopologyCache();
     scene.add(mesh);
     currentShape = name;
+    syncShapeUi(name);
 }
 
 function refreshWireframe() {
@@ -198,7 +332,9 @@ function addShapeToMesh(name, ox, oy, oz, scale) {
     mg.setAttribute('position', new THREE.BufferAttribute(mp, 3));
     mg.setAttribute('normal', new THREE.BufferAttribute(mn, 3));
     mesh.geometry.dispose(); mesh.geometry = mg;
-    refreshWireframe(); ng.dispose(); ni.dispose();
+    refreshWireframe();
+    rebuildTopologyCache();
+    ng.dispose(); ni.dispose();
 }
 
 // Pre-merge "swell": push existing mesh vertices outward so they wrap the
@@ -233,6 +369,103 @@ function swellMeshAround(centerLocal, radius, blendStrength) {
     }
     p.needsUpdate = true;
     mesh.geometry.computeVertexNormals();
+}
+
+function rebuildTopologyCache() {
+    if (!mesh?.geometry?.attributes?.position) return;
+    const pos = mesh.geometry.attributes.position;
+    const norm = mesh.geometry.attributes.normal;
+    const vertexMap = new Map();
+    const logicalVertices = [];
+    const bufferToLogical = new Array(pos.count);
+    const keyScale = 1000;
+
+    function makeKey(x, y, z) {
+        return `${Math.round(x * keyScale)}:${Math.round(y * keyScale)}:${Math.round(z * keyScale)}`;
+    }
+
+    const v = new THREE.Vector3();
+    const n = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i);
+        const key = makeKey(v.x, v.y, v.z);
+        let logicalId = vertexMap.get(key);
+        if (logicalId === undefined) {
+            logicalId = logicalVertices.length;
+            vertexMap.set(key, logicalId);
+            logicalVertices.push({
+                id: logicalId,
+                position: v.clone(),
+                normal: new THREE.Vector3(),
+                bufferIndices: [],
+            });
+        }
+        const logical = logicalVertices[logicalId];
+        logical.bufferIndices.push(i);
+        if (norm) {
+            n.fromBufferAttribute(norm, i);
+            logical.normal.add(n);
+        }
+        bufferToLogical[i] = logicalId;
+    }
+
+    const adjacency = logicalVertices.map(() => new Set());
+    for (let i = 0; i < pos.count; i += 3) {
+        const a = bufferToLogical[i];
+        const b = bufferToLogical[i + 1];
+        const c = bufferToLogical[i + 2];
+        adjacency[a].add(b); adjacency[a].add(c);
+        adjacency[b].add(a); adjacency[b].add(c);
+        adjacency[c].add(a); adjacency[c].add(b);
+    }
+    logicalVertices.forEach(vtx => {
+        if (vtx.normal.lengthSq() < 1e-6) vtx.normal.set(0, 0, 1);
+        else vtx.normal.normalize();
+    });
+
+    topologyCache.logicalVertices = logicalVertices;
+    topologyCache.bufferToLogical = bufferToLogical;
+    topologyCache.adjacency = adjacency;
+    topologyCache.version++;
+}
+
+function refreshSelectionFromTopology() {
+    if (!selectionState.active || selectionState.logicalVertexIds.size === 0) {
+        selectionState.kind = 'none';
+        selectionState.active = false;
+        return;
+    }
+    const nextIds = new Set();
+    let px = 0, py = 0, pz = 0;
+    let nx = 0, ny = 0, nz = 0;
+    for (const logicalId of selectionState.logicalVertexIds) {
+        const logical = topologyCache.logicalVertices[logicalId];
+        if (!logical) continue;
+        nextIds.add(logicalId);
+        px += logical.position.x; py += logical.position.y; pz += logical.position.z;
+        nx += logical.normal.x; ny += logical.normal.y; nz += logical.normal.z;
+    }
+    if (!nextIds.size) {
+        selectionState.kind = 'none';
+        selectionState.active = false;
+        return;
+    }
+    selectionState.logicalVertexIds = nextIds;
+    selectionState.pointLocal.set(px / nextIds.size, py / nextIds.size, pz / nextIds.size);
+    selectionState.normalLocal.set(nx, ny, nz).normalize();
+    const boundary = new Set();
+    for (const logicalId of nextIds) {
+        const neighbors = topologyCache.adjacency[logicalId] || [];
+        for (const neighborId of neighbors) {
+            if (!nextIds.has(neighborId)) {
+                boundary.add(logicalId);
+                break;
+            }
+        }
+    }
+    selectionState.boundaryVertexIds = boundary;
+    selectionState.kind = 'region';
+    selectionState.active = true;
 }
 
 setShape('sphere');
@@ -279,23 +512,25 @@ function applyWorkshop(name) {
 // Shape Palette UI
 const palette = document.createElement('div');
 palette.id = 'shape-palette';
-palette.style.cssText = 'position:absolute;top:80px;left:20px;z-index:15;display:flex;flex-direction:column;gap:5px;';
-palette.innerHTML = '<div style="font-weight:600;font-size:12px;color:#2b332b;padding-left:4px;">📐 Shapes</div>';
+palette.style.cssText = 'position:absolute;top:86px;left:18px;z-index:15;display:flex;flex-direction:column;gap:8px;width:210px;';
+palette.innerHTML = '<div style="font-weight:700;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:#5a6652;padding-left:6px;">Objects</div>';
 const emojis = { sphere:'🔴', cube:'🟦', cylinder:'🫙', cone:'🔺', torus:'🍩' };
-for (const name of Object.keys(SHAPES)) {
+const PALETTE_SHAPES = ['sphere', 'cube', 'cylinder', 'cone', 'torus'];
+for (const name of PALETTE_SHAPES) {
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:3px;';
+    row.style.cssText = 'display:flex;gap:8px;align-items:stretch;';
     const btn = document.createElement('button');
-    btn.textContent = `${emojis[name]} ${name[0].toUpperCase()+name.slice(1)}`;
+    btn.dataset.shapeSwap = name;
+    btn.innerHTML = `<span style="font-size:15px;line-height:1">${emojis[name]}</span><span style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;"><strong style="font-size:12px;line-height:1">${SHAPE_LABELS[name] || name}</strong><span style="font-size:10px;opacity:0.72;line-height:1">click to swap</span></span>`;
     btn.className = 'pal-btn';
-    btn.style.cssText = 'flex:1;background:rgba(248,238,219,0.95);border:1.5px solid #7b8b6f;border-radius:8px;padding:5px 8px;cursor:pointer;font-size:12px;font-family:inherit;color:#2b332b;text-align:left;';
-    btn.addEventListener('click', () => { saveUndo(); setShape(name); document.querySelectorAll('.pal-btn').forEach(b=>b.style.borderWidth='1.5px'); btn.style.borderWidth='3px'; });
+    btn.style.cssText = 'flex:1;display:flex;align-items:center;gap:8px;background:rgba(248,238,219,0.92);border:1.5px solid #7b8b6f;border-radius:14px;padding:10px 12px;cursor:pointer;font-size:12px;font-family:inherit;color:#2b332b;text-align:left;box-shadow:0 6px 18px rgba(0,0,0,0.06);';
+    btn.addEventListener('click', () => { saveUndo(); setShape(name); });
     if (name==='sphere') btn.style.borderWidth='3px';
     const add = document.createElement('button');
     add.textContent = '➕'; add.title = `Add ${name} (click to enter placement mode, Esc to exit)`;
     add.className = 'pal-add';
     add.dataset.shape = name;
-    add.style.cssText = 'background:rgba(248,238,219,0.95);border:1.5px solid #7b8b6f;border-radius:8px;padding:5px 7px;cursor:pointer;font-size:13px;';
+    add.style.cssText = 'min-width:38px;background:rgba(248,238,219,0.95);border:1.5px solid #7b8b6f;border-radius:14px;padding:0 10px;cursor:pointer;font-size:14px;box-shadow:0 6px 18px rgba(0,0,0,0.06);';
     add.addEventListener('click', () => {
         if (placementShape === name) cancelPlacement();
         else startPlacement(name);
@@ -303,6 +538,9 @@ for (const name of Object.keys(SHAPES)) {
     row.appendChild(btn); row.appendChild(add); palette.appendChild(row);
 }
 document.body.appendChild(palette);
+
+// mark palette for docking
+palette.classList.add('left-palette');
 
 // Placement mode — click to set position, drag to scale, release to commit
 let placementShape = null;
@@ -327,23 +565,46 @@ let smoothedDepth = 0.5;
 let smoothedBlend = 0.7;
 
 const placementLabel = document.createElement('div');
-placementLabel.style.cssText = 'display:none;position:absolute;bottom:180px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(248,238,219,0.95);border:1.5px solid #7b8b6f;border-radius:8px;padding:8px 16px;font-size:13px;font-family:inherit;color:#2b332b;pointer-events:none;';
+placementLabel.style.cssText = 'display:none;position:absolute;bottom:172px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(248,238,219,0.96);border:1.5px solid #7b8b6f;border-radius:999px;padding:10px 18px;font-size:13px;font-family:inherit;color:#2b332b;pointer-events:none;box-shadow:0 10px 24px rgba(0,0,0,0.12);';
 document.body.appendChild(placementLabel);
 
 const previewMat = new THREE.MeshStandardMaterial({ color: 0xffdd57, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
 
-function startPlacement(n) {
+function getPlacementDefaults(shapeName = currentShape) {
+    if (interactionState.lastAddSpec && interactionState.lastAddSpec.shape === shapeName) {
+        return { ...interactionState.lastAddSpec };
+    }
+    return { shape: shapeName, scale: 0.3, depth: 0.5, blendStrength: 0.7, variant: 'default' };
+}
+
+function capturePlacementSpec(shapeName, scale, depth, blendStrength) {
+    const spec = {
+        shape: shapeName,
+        scale,
+        depth,
+        blendStrength,
+        variant: shapeName,
+    };
+    interactionState.lastAddSpec = spec;
+    interactionState.placementSpec = { ...spec };
+}
+
+function startPlacement(n, spec = null) {
+    interactionState.placementSpec = { ...getPlacementDefaults(n), ...(spec || {}), shape: n, variant: n };
     placementShape = n;
+    smoothedScale = interactionState.placementSpec.scale;
+    smoothedDepth = interactionState.placementSpec.depth;
+    smoothedBlend = interactionState.placementSpec.blendStrength;
     document.body.style.cursor = 'crosshair';
-    placementLabel.textContent = `🖱️  Click & drag (↑↓ size · ←→ depth)   ·   🖐️  Pinch to spawn (push hand forward to extrude · pull back to indent)   ·   Esc cancel`;
+    placementLabel.textContent = `Placement: ${SHAPE_LABELS[n] || n} · drag to size/depth · pinch to place with hands · Esc cancels`;
     placementLabel.style.display = 'block';
     // Highlight the active palette button so the user can see they're in placement mode.
     document.querySelectorAll('.pal-add').forEach(b => b.classList.toggle('active', b.dataset.shape === n));
 }
 
-// Soft reset after a successful commit: clears the in-flight preview/drag state
-// but KEEPS `placementShape` selected so the user can immediately add another
-// (sticky placement mode). To exit, press Esc or click ➕ again.
+// Exit placement mode after a successful commit: clears the in-flight preview/drag
+// state and disarms `placementShape` so the next shape must be explicitly armed
+// again with the + button.
 function finishPlacement() {
     placementDragging = false;
     placementPos = null;
@@ -351,14 +612,17 @@ function finishPlacement() {
     gesturePlacing = false;
     gesturePinchStartZ = null;
     gesturePinchStartDist = null;
+    placementShape = null;
+    interactionState.activeOperation = null;
     if (placementPreview) {
         scene.remove(placementPreview);
         placementPreview.geometry.dispose();
         placementPreview = null;
     }
-    if (placementShape) {
-        placementLabel.textContent = `✓ locked. Pinch / click again to add another ${placementShape} (Esc to exit)`;
-    }
+    document.body.style.cursor = '';
+    placementLabel.style.display = 'none';
+    document.querySelectorAll('.pal-add').forEach(b => b.classList.remove('active'));
+    closeBlendPanel();
 }
 
 function cancelPlacement() {
@@ -368,6 +632,7 @@ function cancelPlacement() {
     gesturePlacing = false;
     gesturePinchStartZ = null;
     gesturePinchStartDist = null;
+    interactionState.activeOperation = null;
     if (placementPreview) { scene.remove(placementPreview); placementPreview.geometry.dispose(); placementPreview = null; }
     document.body.style.cursor = '';
     placementLabel.style.display = 'none';
@@ -380,11 +645,15 @@ function cancelPlacement() {
 // Default depth at click time is 0.5 (half-buried = naturally merged look).
 function updatePreviewFromDrag(mouseX, mouseY) {
     if (!placementPreview || !placementPos || !placementNormal) return;
+    const baseScale = interactionState.placementSpec?.scale ?? 0.3;
+    const baseDepth = interactionState.placementSpec?.depth ?? 0.5;
     const sDelta = (placementStartY - mouseY) * 0.005;
     const dDelta = (mouseX - placementStartX) * 0.004;
-    const s = Math.max(0.1, Math.min(2.0, 0.3 + sDelta));
-    const d = Math.max(-1.0, Math.min(1.0, 0.5 + dDelta));
+    const s = Math.max(0.1, Math.min(2.0, baseScale + sDelta));
+    const d = Math.max(-1.0, Math.min(1.0, baseDepth + dDelta));
     blendDepth = d;
+    smoothedScale = s;
+    smoothedDepth = d;
     placementPreview.scale.setScalar(s);
     const localCenter = new THREE.Vector3(
         placementPos.x + placementNormal.x * s * d,
@@ -450,7 +719,8 @@ blendPanel.querySelector('#bl-cancel').addEventListener('click', cancelPlacement
 blendPanel.querySelector('#bl-confirm').addEventListener('click', commitPlacementBlended);
 
 function openBlendPanel() {
-    blendDepth = 0.5; blendStrength = 0.7;
+    blendDepth = interactionState.placementSpec?.depth ?? 0.5;
+    blendStrength = interactionState.placementSpec?.blendStrength ?? 0.7;
     blDepthEl.value = blendDepth; blDepthV.textContent = fmtSigned(blendDepth);
     blBlendEl.value = blendStrength; blBlendV.textContent = blendStrength.toFixed(2);
     blendPanel.classList.add('open');
@@ -474,6 +744,33 @@ function updateBlendPreview() {
     placementPreview.position.copy(local.applyMatrix4(mesh.matrixWorld));
     if (blendDepth < 0) placementPreview.material.color.setHex(0xff7eb6);
     else placementPreview.material.color.setHex(0xffdd57);
+}
+
+// Commit gesture placement cleanly — shape sits on surface without distortion
+function commitGesturePlacement() {
+    if (!placementPreview || !placementPos || !placementNormal) { finishPlacement(); return; }
+    saveUndo();
+
+    const s = smoothedScale;  // Use the smoothed scale from gesture
+    const anchor = { x: placementPos.x, y: placementPos.y, z: placementPos.z };
+    const localNormal = placementNormal.clone();
+
+    // Keep the inserted shape's original form intact.
+    // Only bias it slightly into the surface so it reads as attached, not floating.
+    const offset = smoothedDepth * s * 0.2;
+    const center = {
+        x: anchor.x + localNormal.x * offset,
+        y: anchor.y + localNormal.y * offset,
+        z: anchor.z + localNormal.z * offset,
+    };
+
+    // Add the new shape geometry cleanly
+    addShapeToMesh(placementShape, center.x, center.y, center.z, s);
+    capturePlacementSpec(placementShape, s, smoothedDepth, blendStrength);
+
+    // Keep placement mode sticky for rapid repeat-adding
+    finishPlacement();
+    if(isDebug) console.log('✅ Gesture placement committed');
 }
 
 function commitPlacementBlended() {
@@ -516,16 +813,11 @@ function commitPlacementBlended() {
             brushRadius = oldR;
         }
         refreshWireframe();
+        rebuildTopologyCache();
     } else {
-        // EXTRUDE / SURFACE-MERGE
-        // Geometric model: the new shape is treated as a sphere of radius `s` centred at
-        //   center = anchor + normal * (depth * s)
-        // depth = +1 → shape sits fully on top, only touching at one point.
-        // depth =  0 → shape's equator passes through the original surface (half-buried).
-        // depth = -0  → (handled in indent branch above).
-        // To make the join seamless we (1) pre-swell the existing mesh outward so it
-        // wraps the buried portion of the new shape, (2) add the new shape geometry,
-        // (3) run several smoothing passes around the join.
+        // POSITIVE PLACEMENT: keep the added primitive rigid and recognizable.
+        // Mouse placement should behave like stamping a clean shape onto the surface,
+        // not like re-sculpting or melting that shape into the host mesh.
         const offset = blendDepth * s;
         const center = {
             x: anchor.x + localNormal.x * offset,
@@ -533,44 +825,26 @@ function commitPlacementBlended() {
             z: anchor.z + localNormal.z * offset,
         };
 
-        // 1) Swell existing mesh outward to embrace the new shape's bounding sphere.
-        //    The merge "radius" is the placement scale `s` (same as the SHAPES default
-        //    primitives, which all roughly fit a unit sphere of radius ~1, scaled by s).
-        if (blendStrength > 0) {
-            swellMeshAround(center, s, blendStrength);
-        }
+        // Slightly bias the shape into the surface so it reads as attached, while
+        // preserving the primitive's own silhouette.
+        center.x -= localNormal.x * s * 0.08;
+        center.y -= localNormal.y * s * 0.08;
+        center.z -= localNormal.z * s * 0.08;
 
-        // 2) Add the new shape geometry, anchored at `center` (in local mesh coords).
         addShapeToMesh(placementShape, center.x, center.y, center.z, s);
-
-        // 3) Smooth the join. Run smoothing centred on a ring around the seam — this is
-        //    where the pre-swelled existing surface meets the new shape's lower hemisphere.
-        if (blendStrength > 0) {
-            const oldR = brushRadius;
-            brushRadius = s * (1.5 + blendStrength * 1.2);
-            const wp = new THREE.Vector3(center.x, center.y, center.z).applyMatrix4(mesh.matrixWorld);
-            const passes = Math.round(3 + blendStrength * 6);
-            for (let k = 0; k < passes; k++) smoothAt(wp);
-            // A second pass slightly biased toward the seam ring (offset back along normal)
-            // catches the disconnected vertices on the lower hemisphere that the first
-            // pass might miss.
-            const seam = new THREE.Vector3(
-                anchor.x - localNormal.x * s * 0.25,
-                anchor.y - localNormal.y * s * 0.25,
-                anchor.z - localNormal.z * s * 0.25,
-            ).applyMatrix4(mesh.matrixWorld);
-            brushRadius = s * (1.2 + blendStrength * 0.8);
-            for (let k = 0; k < Math.round(2 + blendStrength * 3); k++) smoothAt(seam);
-            brushRadius = oldR;
-        }
     }
 
+    capturePlacementSpec(placementShape, s, blendDepth, blendStrength);
     // Sticky mode: keep `placementShape` selected for rapid repeat-adding.
     finishPlacement();
 }
 
 window.addEventListener('keydown', e => {
-    if (e.key === 'Escape') cancelPlacement();
+    if (e.key === 'Escape') {
+        if (interactionState.activeOperation) OperationController.cancel();
+        else if (placementShape || placementPreview) cancelPlacement();
+        else if (gestureSelection.active) SelectionController.clear();
+    }
     if (e.key === 'x' && !e.target.closest('input') && !splitActive) { saveUndo(); splitMesh(0.5); setTimeout(finalizeSplit, 500); }
 });
 
@@ -583,14 +857,14 @@ let symmetryX = false;
 
 // Tool panel
 const toolPanel = document.createElement('div');
-toolPanel.style.cssText = 'position:absolute;top:320px;left:20px;z-index:15;background:rgba(248,238,219,0.95);border:1.5px solid #7b8b6f;border-radius:10px;padding:10px 12px;font-size:12px;font-family:inherit;color:#2b332b;width:155px;';
+toolPanel.style.cssText = 'position:absolute;top:320px;left:20px;z-index:15;background:rgba(248,238,219,0.95);border:1.5px solid #7b8b6f;border-radius:18px;padding:12px 14px;font-size:12px;font-family:inherit;color:#2b332b;width:175px;box-shadow:0 12px 30px rgba(0,0,0,0.10);';
 toolPanel.innerHTML = `
-    <div style="font-weight:600;margin-bottom:6px;">🛠 Sculpt Tools</div>
-    <div id="tool-btns" style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:8px;"></div>
-    <div style="font-weight:600;margin-bottom:4px;">🖌 Size</div>
+    <div style="font-weight:700;margin-bottom:6px;letter-spacing:0.08em;text-transform:uppercase;font-size:11px;color:#5a6652;">Sculpt Tools</div>
+    <div id="tool-btns" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;"></div>
+    <div style="font-weight:600;margin-bottom:4px;">Brush Size</div>
     <input type="range" id="br" min="0.1" max="1.5" step="0.05" value="0.4" style="width:100%;">
     <div style="display:flex;justify-content:space-between;font-size:10px;"><span>Small</span><span id="brv">0.40</span><span>Big</span></div>
-    <div style="font-weight:600;margin:6px 0 4px;">💪 Strength</div>
+    <div style="font-weight:600;margin:6px 0 4px;">Brush Strength</div>
     <input type="range" id="sr" min="0.01" max="0.12" step="0.005" value="0.04" style="width:100%;">
     <div style="display:flex;justify-content:space-between;font-size:10px;"><span>Soft</span><span id="srv">0.040</span><span>Hard</span></div>
     <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">
@@ -600,6 +874,36 @@ toolPanel.innerHTML = `
     </div>
 `;
 document.body.appendChild(toolPanel);
+
+// mark tool panel for docking
+toolPanel.classList.add('left-tools');
+
+// Create a left dock to group palette and tools and a toggle to collapse them
+;(function createLeftDock(){
+    const leftDock = document.createElement('div');
+    leftDock.id = 'left-dock';
+    document.body.appendChild(leftDock);
+
+    // Move existing palette and toolPanel into dock
+    if (palette) leftDock.appendChild(palette);
+    if (toolPanel) leftDock.appendChild(toolPanel);
+
+    // Add small toggle button to show/hide dock
+    const toggle = document.createElement('button');
+    toggle.id = 'left-dock-toggle';
+    toggle.title = 'Toggle tools';
+    toggle.textContent = '☰';
+    document.body.appendChild(toggle);
+    toggle.addEventListener('click', () => leftDock.classList.toggle('collapsed'));
+
+    // Auto-collapse on small screens for clarity
+    function adaptDock() {
+        if (innerWidth <= 900) leftDock.classList.add('collapsed');
+        else leftDock.classList.remove('collapsed');
+    }
+    adaptDock();
+    window.addEventListener('resize', adaptDock);
+})();
 
 const TOOLS = [
     { id:'pull', em:'🔼', tip:'Pull out' },
@@ -612,21 +916,80 @@ const TOOLS = [
     { id:'pinch', em:'🤏', tip:'Pinch vertices together' },
 ];
 
+const toolButtonsById = new Map();
+
+function refreshToolButtonUi() {
+    for (const [id, btn] of toolButtonsById.entries()) {
+        btn.style.background = id === activeTool ? '#7b8b6f' : '#fff';
+        btn.style.color = id === activeTool ? '#fff' : '#2b332b';
+    }
+}
+
+function setActiveTool(nextTool) {
+    if (!TOOLS.some(t => t.id === nextTool)) return;
+    activeTool = nextTool;
+    refreshToolButtonUi();
+}
+
 const tbc = document.getElementById('tool-btns');
 for (const t of TOOLS) {
     const b = document.createElement('button');
     b.textContent = t.em; b.title = t.tip; b.dataset.tool = t.id;
-    b.style.cssText = 'padding:5px 8px;border:1.5px solid #7b8b6f;border-radius:6px;background:#fff;cursor:pointer;font-size:15px;transition:all 0.1s;';
-    b.addEventListener('click', () => { activeTool=t.id; tbc.querySelectorAll('button').forEach(x=>x.style.background='#fff'); b.style.background='#7b8b6f'; });
-    if (t.id==='pull') b.style.background='#7b8b6f';
+    b.style.cssText = 'padding:7px 10px;border:1.5px solid #7b8b6f;border-radius:10px;background:#fff;cursor:pointer;font-size:15px;transition:all 0.1s;box-shadow:0 4px 10px rgba(0,0,0,0.06);';
+    b.addEventListener('click', () => setActiveTool(t.id));
+    toolButtonsById.set(t.id, b);
     tbc.appendChild(b);
 }
+refreshToolButtonUi();
 
 document.getElementById('br').addEventListener('input', e => { brushRadius=parseFloat(e.target.value); document.getElementById('brv').textContent=brushRadius.toFixed(2); });
 document.getElementById('sr').addEventListener('input', e => { sculptStrength=parseFloat(e.target.value); document.getElementById('srv').textContent=sculptStrength.toFixed(3); });
 
 const symBtn = document.getElementById('sym-btn');
 symBtn.addEventListener('click', () => { symmetryX=!symmetryX; symBtn.style.background=symmetryX?'#7b8b6f':'#fff'; symBtn.style.color=symmetryX?'#fff':'#2b332b'; });
+
+const formActionPanel = document.createElement('div');
+formActionPanel.style.cssText = 'margin-top:10px;padding-top:10px;border-top:1px dashed rgba(123,139,111,0.35);display:flex;flex-direction:column;gap:6px;';
+formActionPanel.innerHTML = `
+    <div style="font-weight:700;letter-spacing:0.08em;text-transform:uppercase;font-size:11px;color:#5a6652;">Form Ops</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+        <button id="dup-last-btn" style="padding:6px;border:1.5px solid #7b8b6f;border-radius:8px;background:#fff;cursor:pointer;font-size:11px;">⧉ Duplicate</button>
+        <button id="clear-patch-btn" style="padding:6px;border:1.5px solid #7b8b6f;border-radius:8px;background:#fff;cursor:pointer;font-size:11px;">◌ Clear</button>
+        <button id="extrude-lite-btn" style="padding:6px;border:1.5px solid #7b8b6f;border-radius:8px;background:#fff;cursor:pointer;font-size:11px;">⇧ Extrude</button>
+        <button id="bevel-lite-btn" style="padding:6px;border:1.5px solid #7b8b6f;border-radius:8px;background:#fff;cursor:pointer;font-size:11px;">⬓ Bevel</button>
+    </div>
+    <div id="selection-readout" style="font-size:11px;line-height:1.35;color:#5a6652;">Patch: none. Click or pinch a surface to select a region.</div>
+`;
+toolPanel.appendChild(formActionPanel);
+
+const duplicateLastBtn = document.getElementById('dup-last-btn');
+const clearPatchBtn = document.getElementById('clear-patch-btn');
+const extrudeLiteBtn = document.getElementById('extrude-lite-btn');
+const bevelLiteBtn = document.getElementById('bevel-lite-btn');
+const selectionReadout = document.getElementById('selection-readout');
+
+duplicateLastBtn.addEventListener('click', () => {
+    if (!beginDuplicatePlacement()) setCommandStatus('Duplicate Last needs a placed shape first');
+});
+clearPatchBtn.addEventListener('click', () => {
+    SelectionController.clear();
+    if (selectionReadout) selectionReadout.textContent = 'Patch: none. Click or pinch a surface to select a region.';
+    setCommandStatus('Selection cleared');
+});
+extrudeLiteBtn.addEventListener('click', () => {
+    if (!gestureSelection.active) {
+        setCommandStatus('Select a patch before extruding');
+        return;
+    }
+    OperationController.nudge('extrude-lite', 0.08);
+});
+bevelLiteBtn.addEventListener('click', () => {
+    if (!gestureSelection.active) {
+        setCommandStatus('Select a patch before beveling');
+        return;
+    }
+    OperationController.nudge('bevel-lite', 0.06);
+});
 
 // Undo — full snapshot of geometry + material + transform so any action can be reversed
 const undoStack = [];
@@ -664,6 +1027,7 @@ function undo() {
     mesh.geometry = g;
     mesh.geometry.computeVertexNormals();
     refreshWireframe();
+    rebuildTopologyCache();
     // Restore material
     material.color.setHex(s.material.color);
     material.metalness = s.material.metalness;
@@ -676,6 +1040,7 @@ function undo() {
     mesh.scale.fromArray(s.scale);
     mesh.position.fromArray(s.position);
     mesh.rotation.set(s.rotation[0], s.rotation[1], s.rotation[2]);
+    SelectionController.refreshFromGeometry();
 }
 document.getElementById('undo-btn').addEventListener('click', undo);
 window.addEventListener('keydown', e => {
@@ -721,8 +1086,332 @@ scene.add(brushViz);
 function showBrush(pt, nm) { brushViz.position.copy(pt); brushViz.scale.setScalar(brushRadius); if(nm){const t=pt.clone().add(nm);brushViz.lookAt(t);} brushViz.visible=true; }
 function hideBrush() { brushViz.visible = false; }
 
+// Gesture hover/select visuals (post-placement sculpt intent)
+const hoverVizMat = new THREE.MeshBasicMaterial({ color: 0xfff08a, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthTest: false, toneMapped: false });
+const hoverViz = new THREE.Mesh(new THREE.RingGeometry(0.90, 1.0, 48), hoverVizMat);
+hoverViz.visible = false;
+hoverViz.renderOrder = 1000;
+scene.add(hoverViz);
+
+const gestureSelectRings = [];
+const selectRingScales = [0.88, 1.12, 1.38, 1.68];
+for (let i = 0; i < selectRingScales.length; i++) {
+    const m = new THREE.MeshBasicMaterial({ color: 0xfff3a1, transparent: true, opacity: Math.max(0.12, 0.38 - i * 0.07), side: THREE.DoubleSide, depthTest: false, toneMapped: false });
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.90, 1.0, 48), m);
+    ring.visible = false;
+    ring.renderOrder = 1001 + i;
+    scene.add(ring);
+    gestureSelectRings.push(ring);
+}
+
+const gestureSelectionGlow = new THREE.Mesh(
+    new THREE.CircleGeometry(1.0, 48),
+    new THREE.MeshBasicMaterial({ color: 0xfff4b8, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthTest: false, toneMapped: false })
+);
+gestureSelectionGlow.visible = false;
+gestureSelectionGlow.renderOrder = 1000;
+scene.add(gestureSelectionGlow);
+
+const gestureSelection = selectionState;
+let pinchSelectLatch = false;
+let pinchSculptLastZ = null;
+let pinchSculptUndoArmed = false;
+
+function orientRingAt(ring, pt, nm, scale) {
+    ring.position.copy(pt);
+    ring.scale.setScalar(scale);
+    const look = pt.clone().add(nm);
+    ring.lookAt(look);
+    ring.visible = true;
+}
+
+function showGestureHover(ptLocal, nmLocal, radius) {
+    const worldPt = ptLocal.clone().applyMatrix4(mesh.matrixWorld);
+    const worldNormal = nmLocal.clone().transformDirection(mesh.matrixWorld).normalize();
+    orientRingAt(hoverViz, worldPt, worldNormal, radius);
+}
+
+function hideGestureHover() {
+    hoverViz.visible = false;
+}
+
+function updateGestureSelectionViz() {
+    if (!gestureSelection.active) {
+        gestureSelectRings.forEach(r => r.visible = false);
+        gestureSelectionGlow.visible = false;
+        if (selectionReadout) selectionReadout.textContent = 'Patch: none. Click or pinch a surface to select a region.';
+        return;
+    }
+    const worldPt = gestureSelection.pointLocal.clone().applyMatrix4(mesh.matrixWorld);
+    const worldNormal = gestureSelection.normalLocal.clone().transformDirection(mesh.matrixWorld).normalize();
+
+    gestureSelectionGlow.position.copy(worldPt);
+    const pulseActive = performance.now() < gestureSelection.pulseUntil;
+    const pulseScale = pulseActive ? 1.16 + Math.sin(performance.now() * 0.03) * 0.03 : 1.05;
+    gestureSelectionGlow.scale.setScalar(gestureSelection.radius * pulseScale);
+    gestureSelectionGlow.material.opacity = pulseActive ? 0.20 : 0.12;
+    gestureSelectionGlow.lookAt(worldPt.clone().add(worldNormal));
+    gestureSelectionGlow.visible = true;
+
+    for (let i = 0; i < gestureSelectRings.length; i++) {
+        orientRingAt(
+            gestureSelectRings[i],
+            worldPt,
+            worldNormal,
+            gestureSelection.radius * selectRingScales[i],
+        );
+    }
+    if (selectionReadout) {
+        selectionReadout.textContent = `Patch: ${gestureSelection.logicalVertexIds.size} verts · boundary ${gestureSelection.boundaryVertexIds.size} · ${interactionState.mode === 'detail' ? 'detail/bevel ready' : interactionState.mode === 'form' ? 'form/extrude ready' : 'mold ready'}`;
+    }
+}
+
+function clearGestureSelection() {
+    gestureSelection.active = false;
+    gestureSelection.kind = 'none';
+    gestureSelection.logicalVertexIds = new Set();
+    gestureSelection.boundaryVertexIds = new Set();
+    pinchSelectLatch = false;
+    pinchSculptLastZ = null;
+    pinchSculptUndoArmed = false;
+    gestureSelection.pulseUntil = 0;
+    hideGestureHover();
+    gestureSelectionGlow.visible = false;
+    gestureSelectRings.forEach(r => r.visible = false);
+    if (selectionReadout) selectionReadout.textContent = 'Patch: none. Click or pinch a surface to select a region.';
+}
+
+function logicalVertexFromHit(hit) {
+    if (!hit?.face) return null;
+    const faceIndices = [hit.face.a, hit.face.b, hit.face.c].filter(idx => idx !== undefined);
+    if (!faceIndices.length) return null;
+    let best = topologyCache.bufferToLogical[faceIndices[0]];
+    let bestDist = Infinity;
+    const p = mesh.geometry.attributes.position;
+    const v = new THREE.Vector3();
+    for (const idx of faceIndices) {
+        v.fromBufferAttribute(p, idx);
+        const d = v.distanceToSquared(hit.point.clone().applyMatrix4(mesh.matrixWorld.clone().invert()));
+        if (d < bestDist) {
+            bestDist = d;
+            best = topologyCache.bufferToLogical[idx];
+        }
+    }
+    return best ?? null;
+}
+
+const SelectionController = {
+    clear() {
+        clearGestureSelection();
+    },
+    selectHit(hit, radius = Math.max(0.34, Math.min(1.35, brushRadius * 1.8))) {
+        if (!hit) return;
+        const inv = mesh.matrixWorld.clone().invert();
+        const pointLocal = hit.point.clone().applyMatrix4(inv);
+        const normalLocal = getHitNormal(hit).transformDirection(inv).normalize();
+        const seedLogicalId = logicalVertexFromHit(hit);
+        const selected = new Set();
+        const queue = [];
+        if (seedLogicalId !== null) queue.push(seedLogicalId);
+        const radius2 = radius * radius * 1.2;
+        while (queue.length) {
+            const logicalId = queue.shift();
+            if (selected.has(logicalId)) continue;
+            const logical = topologyCache.logicalVertices[logicalId];
+            if (!logical) continue;
+            if (logical.position.distanceToSquared(pointLocal) > radius2) continue;
+            selected.add(logicalId);
+            for (const neighborId of topologyCache.adjacency[logicalId] || []) {
+                if (!selected.has(neighborId)) queue.push(neighborId);
+            }
+        }
+        if (!selected.size) return;
+        gestureSelection.active = true;
+        gestureSelection.kind = 'region';
+        gestureSelection.pointLocal.copy(pointLocal);
+        gestureSelection.normalLocal.copy(normalLocal);
+        gestureSelection.radius = radius;
+        gestureSelection.logicalVertexIds = selected;
+        gestureSelection.boundaryVertexIds = new Set();
+        gestureSelection.pulseUntil = performance.now() + 220;
+        refreshSelectionFromTopology();
+        updateGestureSelectionViz();
+    },
+    refreshFromGeometry() {
+        if (!gestureSelection.active) return;
+        refreshSelectionFromTopology();
+        updateGestureSelectionViz();
+    },
+};
+
+function selectGestureRegion(hit) {
+    SelectionController.selectHit(hit);
+}
+
+function syncSelectionAfterGeometryChange(refreshEdges = false) {
+    mesh.geometry.computeVertexNormals();
+    rebuildTopologyCache();
+    if (gestureSelection.active) SelectionController.refreshFromGeometry();
+    if (refreshEdges) refreshWireframe();
+}
+
+function snapScalar(value, step) {
+    if (!step) return value;
+    return Math.round(value / step) * step;
+}
+
+function signedDominantAxis(vec) {
+    const absX = Math.abs(vec.x);
+    const absY = Math.abs(vec.y);
+    const absZ = Math.abs(vec.z);
+    if (absX >= absY && absX >= absZ) return new THREE.Vector3(Math.sign(vec.x) || 1, 0, 0);
+    if (absY >= absX && absY >= absZ) return new THREE.Vector3(0, Math.sign(vec.y) || 1, 0);
+    return new THREE.Vector3(0, 0, Math.sign(vec.z) || 1);
+}
+
+function getSnappedSelectionNormal(mode = interactionState.mode) {
+    const base = gestureSelection.normalLocal.clone().normalize();
+    const snapped = signedDominantAxis(base);
+    const blend = mode === 'detail'
+        ? GESTURE_TUNING.detailNormalSnap
+        : mode === 'form'
+            ? GESTURE_TUNING.formNormalSnap
+            : GESTURE_TUNING.sculptNormalSnap;
+    return base.lerp(snapped, blend).normalize();
+}
+
+function getSelectionFrame(mode = interactionState.mode) {
+    const normal = getSnappedSelectionNormal(mode);
+    const cameraRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+    const tangentX = cameraRight.clone().sub(normal.clone().multiplyScalar(cameraRight.dot(normal)));
+    if (tangentX.lengthSq() < 1e-6) tangentX.copy(new THREE.Vector3(1, 0, 0).sub(normal.clone().multiplyScalar(normal.x)));
+    tangentX.normalize();
+    const tangentY = new THREE.Vector3().crossVectors(normal, tangentX).normalize();
+    return { normal, tangentX, tangentY };
+}
+
+function regularizeSelectedPatch({ planarStrength = 0.6, quantizeTangent = false, tangentStep = GESTURE_TUNING.dragStep, boundaryStrength = 0.4, mode = interactionState.mode } = {}) {
+    if (!gestureSelection.active || !gestureSelection.logicalVertexIds.size) return;
+    const p = mesh.geometry.attributes.position;
+    const { normal, tangentX, tangentY } = getSelectionFrame(mode);
+    let avgDepth = 0;
+    const ids = [...gestureSelection.logicalVertexIds];
+    for (const logicalId of ids) {
+        const logical = topologyCache.logicalVertices[logicalId];
+        if (!logical) continue;
+        avgDepth += logical.position.dot(normal);
+    }
+    avgDepth /= Math.max(ids.length, 1);
+
+    for (const logicalId of ids) {
+        const logical = topologyCache.logicalVertices[logicalId];
+        if (!logical) continue;
+        const offset = logical.position.clone().sub(gestureSelection.pointLocal);
+        const tx = offset.dot(tangentX);
+        const ty = offset.dot(tangentY);
+        const quantizedTx = quantizeTangent ? snapScalar(tx, tangentStep) : tx;
+        const quantizedTy = quantizeTangent ? snapScalar(ty, tangentStep) : ty;
+        const target = gestureSelection.pointLocal.clone()
+            .addScaledVector(tangentX, quantizedTx)
+            .addScaledVector(tangentY, quantizedTy)
+            .addScaledVector(normal, avgDepth - gestureSelection.pointLocal.dot(normal));
+        const strength = gestureSelection.boundaryVertexIds.has(logicalId) ? planarStrength * boundaryStrength : planarStrength;
+        setLogicalVertexPosition(logicalId, logical.position.clone().lerp(target, strength));
+    }
+    p.needsUpdate = true;
+}
+
+function normalizeOperationDelta(id, rawDelta) {
+    if (id === 'bevel-lite') {
+        if (Math.abs(rawDelta) < GESTURE_TUNING.bevelDepthDeadZone) return 0;
+        return snapScalar(THREE.MathUtils.clamp(rawDelta * GESTURE_TUNING.bevelDepthScale, -0.045, 0.045), GESTURE_TUNING.bevelDepthStep);
+    }
+    if (id === 'extrude-lite') {
+        if (Math.abs(rawDelta) < GESTURE_TUNING.formDepthDeadZone) return 0;
+        return snapScalar(THREE.MathUtils.clamp(rawDelta * GESTURE_TUNING.formDepthScale, -0.06, 0.06), GESTURE_TUNING.formDepthStep);
+    }
+    return rawDelta;
+}
+
+const OperationController = {
+    begin(id, meta = {}) {
+        if (!gestureSelection.active || !gestureSelection.logicalVertexIds.size) return false;
+        if (!interactionState.activeOperation || interactionState.activeOperation.id !== id) {
+            saveUndo();
+            interactionState.activeOperation = { id, lastValue: 0, meta };
+        }
+        return true;
+    },
+    update(nextValue) {
+        const op = interactionState.activeOperation;
+        if (!op) return;
+        const delta = normalizeOperationDelta(op.id, nextValue - op.lastValue);
+        if (Math.abs(delta) < 0.0005) return;
+        if (op.id === 'extrude-lite') extrudeSelectedPatch(delta);
+        if (op.id === 'bevel-lite') bevelSelectedPatch(delta);
+        op.lastValue += delta;
+        syncSelectionAfterGeometryChange(false);
+    },
+    commit() {
+        if (!interactionState.activeOperation) return;
+        syncSelectionAfterGeometryChange(true);
+        setCommandStatus(interactionState.activeOperation.id === 'bevel-lite' ? 'Selection beveled' : 'Selection extruded');
+        interactionState.activeOperation = null;
+    },
+    cancel() {
+        if (!interactionState.activeOperation) return;
+        undo();
+        interactionState.activeOperation = null;
+        SelectionController.refreshFromGeometry();
+    },
+    nudge(id, amount) {
+        if (!this.begin(id, { source: 'button' })) return;
+        this.update(amount);
+        this.commit();
+    },
+};
+
+function sculptSelectedRegion(pinchZ) {
+    if (!gestureSelection.active) return;
+    if (interactionState.mode === 'form' || interactionState.mode === 'detail') {
+        const opId = interactionState.mode === 'detail' ? 'bevel-lite' : 'extrude-lite';
+        if (!OperationController.begin(opId, { source: 'gesture' })) return;
+        if (pinchSculptLastZ !== null) {
+            const dz = pinchZ - pinchSculptLastZ;
+            const nextValue = interactionState.activeOperation.lastValue + dz * 2.1;
+            OperationController.update(nextValue);
+        }
+        pinchSculptLastZ = pinchZ;
+        return;
+    }
+    if (!pinchSculptUndoArmed) {
+        saveUndo();
+        pinchSculptUndoArmed = true;
+    }
+    if (pinchSculptLastZ !== null) {
+        const dz = pinchZ - pinchSculptLastZ;
+        if (Math.abs(dz) < GESTURE_TUNING.sculptDepthDeadZone) {
+            pinchSculptLastZ = pinchZ;
+            return;
+        }
+        const pushPull = snapScalar(Math.max(-0.045, Math.min(0.045, dz * GESTURE_TUNING.sculptDepthScale)), GESTURE_TUNING.sculptDepthStep);
+        if (Math.abs(pushPull) > 0.0008) {
+            extrudeSelectedPatch(pushPull * 0.55);
+            regularizeSelectedPatch({ planarStrength: 0.46, quantizeTangent: true, tangentStep: GESTURE_TUNING.dragStep, boundaryStrength: 0.55, mode: 'sculpt' });
+            syncSelectionAfterGeometryChange(false);
+        }
+    }
+    pinchSculptLastZ = pinchZ;
+}
+
 // Sculpt functions — reusable temps
 const _v = new THREE.Vector3(), _lp = new THREE.Vector3(), _ln = new THREE.Vector3(), _n = new THREE.Vector3();
+
+function getHitNormal(hit) {
+    if (hit?.face?.normal) return hit.face.normal.clone();
+    if (hit?.normal) return hit.normal.clone();
+    return new THREE.Vector3(0, 0, 1);
+}
 
 function sculptAt(point, normal, strength) {
     const p = mesh.geometry.attributes.position;
@@ -812,37 +1501,185 @@ function pinchAt(point) {
 }
 
 function applyTool(hit, dx, dy) {
+    const hitNormal = getHitNormal(hit);
     switch(activeTool) {
-        case 'pull': sculptAt(hit.point, hit.face.normal, sculptStrength); break;
-        case 'push': sculptAt(hit.point, hit.face.normal, -sculptStrength); break;
+        case 'pull': sculptAt(hit.point, hitNormal, sculptStrength); break;
+        case 'push': sculptAt(hit.point, hitNormal, -sculptStrength); break;
         case 'smooth': smoothAt(hit.point); break;
-        case 'flatten': flattenAt(hit.point, hit.face.normal); break;
+        case 'flatten': flattenAt(hit.point, hitNormal); break;
         case 'inflate': inflateAt(hit.point, sculptStrength); break;
         case 'grab': grabAt(hit.point, dx||0, dy||0); break;
-        case 'crease': creaseAt(hit.point, hit.face.normal, sculptStrength); break;
+        case 'crease': creaseAt(hit.point, hitNormal, sculptStrength); break;
         case 'pinch': pinchAt(hit.point); break;
     }
     if (symmetryX) {
         const inv=mesh.matrixWorld.clone().invert();
         const lp=hit.point.clone().applyMatrix4(inv); lp.x=-lp.x;
         const mp=lp.applyMatrix4(mesh.matrixWorld);
-        const mn=hit.face.normal.clone(); mn.x=-mn.x;
+        const mn=getHitNormal(hit); mn.x=-mn.x;
         raycaster.set(mp.clone().addScaledVector(mn,0.5), mn.clone().negate());
         const mh=raycaster.intersectObject(mesh);
         if(mh.length) {
             const m=mh[0];
+            const mNormal = getHitNormal(m);
             switch(activeTool) {
-                case 'pull': sculptAt(m.point,m.face.normal,sculptStrength); break;
-                case 'push': sculptAt(m.point,m.face.normal,-sculptStrength); break;
+                case 'pull': sculptAt(m.point,mNormal,sculptStrength); break;
+                case 'push': sculptAt(m.point,mNormal,-sculptStrength); break;
                 case 'smooth': smoothAt(m.point); break;
-                case 'flatten': flattenAt(m.point,m.face.normal); break;
+                case 'flatten': flattenAt(m.point,mNormal); break;
                 case 'inflate': inflateAt(m.point,sculptStrength); break;
                 case 'grab': grabAt(m.point,dx?-dx:0,dy||0); break;
-                case 'crease': creaseAt(m.point,m.face.normal,sculptStrength); break;
+                case 'crease': creaseAt(m.point,mNormal,sculptStrength); break;
                 case 'pinch': pinchAt(m.point); break;
             }
         }
     }
+}
+
+function applyToolToSelection(dx = 0, dy = 0) {
+    if (!gestureSelection.active) return false;
+    const worldPoint = gestureSelection.pointLocal.clone().applyMatrix4(mesh.matrixWorld);
+    const worldNormal = gestureSelection.normalLocal.clone().transformDirection(mesh.matrixWorld).normalize();
+    const oldR = brushRadius;
+    brushRadius = gestureSelection.radius;
+    switch (activeTool) {
+        case 'pull': sculptAt(worldPoint, worldNormal, sculptStrength); break;
+        case 'push': sculptAt(worldPoint, worldNormal, -sculptStrength); break;
+        case 'smooth': smoothAt(worldPoint); break;
+        case 'flatten': flattenAt(worldPoint, worldNormal); break;
+        case 'inflate': inflateAt(worldPoint, sculptStrength); break;
+        case 'grab': moveSelectedPatchByScreenDelta(dx, dy); break;
+        case 'crease': creaseAt(worldPoint, worldNormal, sculptStrength); break;
+        case 'pinch': pinchAt(worldPoint); break;
+        default:
+            brushRadius = oldR;
+            return false;
+    }
+    brushRadius = oldR;
+    syncSelectionAfterGeometryChange(false);
+    return true;
+}
+
+function setLogicalVertexPosition(logicalId, nextPosition) {
+    const p = mesh.geometry.attributes.position;
+    const logical = topologyCache.logicalVertices[logicalId];
+    if (!logical) return;
+    for (const bufferIndex of logical.bufferIndices) {
+        p.setXYZ(bufferIndex, nextPosition.x, nextPosition.y, nextPosition.z);
+    }
+}
+
+function getSelectionWeight(logicalId) {
+    const logical = topologyCache.logicalVertices[logicalId];
+    if (!logical) return 0;
+    const dist = logical.position.distanceTo(gestureSelection.pointLocal);
+    const radial = THREE.MathUtils.clamp(1 - dist / Math.max(gestureSelection.radius, 0.001), 0, 1);
+    let weight = 0.22 + radial * 0.78;
+    if (gestureSelection.boundaryVertexIds.has(logicalId)) weight *= 0.42;
+    return weight;
+}
+
+function softenSelectionBoundary(amount = 0.18) {
+    if (!gestureSelection.boundaryVertexIds.size) return;
+    const updates = [];
+    for (const logicalId of gestureSelection.boundaryVertexIds) {
+        const logical = topologyCache.logicalVertices[logicalId];
+        if (!logical) continue;
+        const neighbors = [...(topologyCache.adjacency[logicalId] || [])];
+        if (!neighbors.length) continue;
+        const avg = new THREE.Vector3();
+        let count = 0;
+        for (const neighborId of neighbors) {
+            const neighbor = topologyCache.logicalVertices[neighborId];
+            if (!neighbor) continue;
+            avg.add(neighbor.position);
+            count++;
+        }
+        if (!count) continue;
+        avg.multiplyScalar(1 / count);
+        updates.push([logicalId, logical.position.clone().lerp(avg, amount)]);
+    }
+    const p = mesh.geometry.attributes.position;
+    for (const [logicalId, nextPosition] of updates) {
+        setLogicalVertexPosition(logicalId, nextPosition);
+    }
+    p.needsUpdate = true;
+}
+
+function extrudeSelectedPatch(amount) {
+    const p = mesh.geometry.attributes.position;
+    const moveNormal = getSnappedSelectionNormal('form');
+    for (const logicalId of gestureSelection.logicalVertexIds) {
+        const logical = topologyCache.logicalVertices[logicalId];
+        if (!logical) continue;
+        const weight = gestureSelection.boundaryVertexIds.has(logicalId) ? 0.58 : 1.0;
+        const nextPosition = logical.position.clone().addScaledVector(moveNormal, amount * weight * 1.05);
+        setLogicalVertexPosition(logicalId, nextPosition);
+    }
+    p.needsUpdate = true;
+    regularizeSelectedPatch({ planarStrength: 0.84, quantizeTangent: true, tangentStep: GESTURE_TUNING.formDepthStep, boundaryStrength: 0.52, mode: 'form' });
+    softenSelectionBoundary(0.16);
+}
+
+function bevelSelectedPatch(amount) {
+    const p = mesh.geometry.attributes.position;
+    const center = gestureSelection.pointLocal.clone();
+    const { normal, tangentX, tangentY } = getSelectionFrame('detail');
+    for (const logicalId of gestureSelection.logicalVertexIds) {
+        const logical = topologyCache.logicalVertices[logicalId];
+        if (!logical) continue;
+        const weight = gestureSelection.boundaryVertexIds.has(logicalId) ? 0.62 : 1.0;
+        const offset = logical.position.clone().sub(center);
+        const tx = snapScalar(offset.dot(tangentX), GESTURE_TUNING.bevelDepthStep);
+        const ty = snapScalar(offset.dot(tangentY), GESTURE_TUNING.bevelDepthStep);
+        const tangent = tangentX.clone().multiplyScalar(tx).addScaledVector(tangentY, ty);
+        const tangentShrink = tangent.multiplyScalar(-amount * weight * 0.32);
+        const lift = normal.clone().multiplyScalar(amount * weight * 0.66);
+        const nextPosition = logical.position.clone().add(tangentShrink).add(lift);
+        setLogicalVertexPosition(logicalId, nextPosition);
+    }
+    p.needsUpdate = true;
+    regularizeSelectedPatch({ planarStrength: 0.9, quantizeTangent: true, tangentStep: GESTURE_TUNING.bevelDepthStep, boundaryStrength: 0.58, mode: 'detail' });
+    softenSelectionBoundary(0.26);
+}
+
+function moveSelectedPatchByScreenDelta(dx, dy) {
+    if (Math.abs(dx) < GESTURE_TUNING.dragPixelDeadZone && Math.abs(dy) < GESTURE_TUNING.dragPixelDeadZone) return;
+    const p = mesh.geometry.attributes.position;
+    const inv = mesh.matrixWorld.clone().invert();
+    const { tangentX, tangentY } = getSelectionFrame(interactionState.mode === 'detail' ? 'detail' : interactionState.mode === 'form' ? 'form' : 'sculpt');
+    let mx = dx * GESTURE_TUNING.dragScale;
+    let my = -dy * GESTURE_TUNING.dragScale;
+    if (Math.abs(mx) > Math.abs(my) * GESTURE_TUNING.axisBiasRatio) my = 0;
+    else if (Math.abs(my) > Math.abs(mx) * GESTURE_TUNING.axisBiasRatio) mx = 0;
+    mx = snapScalar(mx, GESTURE_TUNING.dragStep);
+    my = snapScalar(my, GESTURE_TUNING.dragStep);
+    const worldDelta = tangentX.clone().multiplyScalar(mx).addScaledVector(tangentY, my);
+    const localDelta = worldDelta.transformDirection(inv);
+    for (const logicalId of gestureSelection.logicalVertexIds) {
+        const logical = topologyCache.logicalVertices[logicalId];
+        if (!logical) continue;
+        const weight = gestureSelection.boundaryVertexIds.has(logicalId) ? 0.64 : 0.94;
+        const nextPosition = logical.position.clone().addScaledVector(localDelta, weight);
+        setLogicalVertexPosition(logicalId, nextPosition);
+    }
+    p.needsUpdate = true;
+    regularizeSelectedPatch({
+        planarStrength: interactionState.mode === 'sculpt' ? 0.42 : 0.68,
+        quantizeTangent: interactionState.mode !== 'sculpt',
+        tangentStep: GESTURE_TUNING.dragStep,
+        boundaryStrength: 0.54,
+        mode: interactionState.mode,
+    });
+    softenSelectionBoundary(0.12);
+}
+
+function beginDuplicatePlacement() {
+    if (!interactionState.lastAddSpec) return false;
+    setInteractionMode('add', 'ui');
+    startPlacement(interactionState.lastAddSpec.shape, interactionState.lastAddSpec);
+    setCommandStatus(`Duplicate ready: ${SHAPE_LABELS[interactionState.lastAddSpec.shape] || interactionState.lastAddSpec.shape}`);
+    return true;
 }
 
 // ============================================================
@@ -852,6 +1689,7 @@ const video = document.getElementById('webcam');
 let handLandmarker, lastVideoTime = -1;
 const debugOverlay=document.getElementById('debug-overlay'), debugCanvas=document.getElementById('debug-canvas');
 const debugCtx=debugCanvas.getContext('2d'), debugText=document.getElementById('debug-gesture-text');
+const debugCommandText=document.getElementById('debug-command-text');
 const drawUtils=new DrawingUtils(debugCtx), debugBtn=document.getElementById('debug-toggle-btn');
 let isDebug=false;
 debugBtn.addEventListener('click',()=>{isDebug=!isDebug;debugBtn.textContent=isDebug?'🛠 Debug On':'🛠 Debug Off';debugBtn.classList.toggle('active',isDebug);debugOverlay.style.display=isDebug?'block':'none';if(isDebug){debugCanvas.width=innerWidth;debugCanvas.height=innerHeight;}else debugCtx.clearRect(0,0,debugCanvas.width,debugCanvas.height);});
@@ -868,6 +1706,7 @@ handsBtn.addEventListener('click', () => {
         rotVX = 0; rotVY = 0;
         last2HDist = null;
         lastPalm = [null, null];
+        lastCuppedPos = [null,null];
         resetGestureState();
         debugText && (debugText.textContent = 'Hands disabled');
     }
@@ -888,6 +1727,34 @@ window.addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);c
 function isOpenPalm(lm){const w=lm[0],t=[8,12,16,20],p=[6,10,14,18];let e=0;for(let i=0;i<4;i++)if(Math.hypot(lm[t[i]].x-w.x,lm[t[i]].y-w.y)>Math.hypot(lm[p[i]].x-w.x,lm[p[i]].y-w.y)*1.15)e++;return e>=3&&Math.hypot(lm[4].x-lm[5].x,lm[4].y-lm[5].y)>0.06;}
 function isFist(lm){const w=lm[0],t=[8,12,16,20],p=[6,10,14,18];let c=0;for(let i=0;i<4;i++)if(Math.hypot(lm[t[i]].x-w.x,lm[t[i]].y-w.y)<Math.hypot(lm[p[i]].x-w.x,lm[p[i]].y-w.y))c++;return c>=4;}
 function isPinching(lm){return Math.hypot(lm[4].x-lm[8].x,lm[4].y-lm[8].y,lm[4].z-lm[8].z)<0.05&&Math.hypot(lm[3].x-lm[7].x,lm[3].y-lm[7].y,lm[3].z-lm[7].z)<0.12;}
+// C-shaped (cupped) hand: fingers curled inward forming a cup, thumb extended outward.
+// SUPER PERMISSIVE: anything that's not a flat open palm AND not a fist AND not a pinch.
+// This is meant to catch real hand-molding gestures in placement mode.
+function isCupped(lm) {
+    const w = lm[0];  // wrist
+    const t = [8, 12, 16, 20];  // finger tips
+    const p = [6, 10, 14, 18];  // finger MCPs (middle knuckles)
+
+    // Check if hand is NOT fully open (not all tips far from wrist)
+    let extendedCount = 0;
+    for (let i = 0; i < 4; i++) {
+        const tipDist = Math.hypot(lm[t[i]].x - w.x, lm[t[i]].y - w.y);
+        const mcpDist = Math.hypot(lm[p[i]].x - w.x, lm[p[i]].y - w.y);
+        // If tip is far from wrist (more than 1.5x the MCP distance), it's extended
+        if (tipDist > mcpDist * 1.5) extendedCount++;
+    }
+
+    // Thumb must be somewhat separated (not pinching against index)
+    const thumbIndexDist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y, lm[4].z - lm[8].z);
+    const notPinching = thumbIndexDist > 0.085;
+
+    // SUPER PERMISSIVE: if NOT all fingers extended AND not pinching → it's a cup
+    const isNotFullyOpen = extendedCount <= 1;
+
+    if(isDebug) console.log('isCupped check:', {extendedCount, notPinching, isNotFullyOpen, thumbIndexDist});
+
+    return isNotFullyOpen && notPinching;
+}
 
 // Dwell-time gesture confirmation — gesture must persist for N consecutive frames
 // before activating, and must be absent for M frames before releasing. This stops
@@ -905,12 +1772,14 @@ function classifyHand(lm) {
     if (wristY < 0.05 || wristY > 0.95) return null;
     if (isFist(lm))    return 'fist';
     if (isPinching(lm)) return 'pinch';
+    if (isCupped(lm) && (placementShape || gestureSelection.active || interactionState.mode === 'sculpt' || interactionState.mode === 'form' || interactionState.mode === 'detail')) return 'cupped';
     if (isOpenPalm(lm)) return 'palm';
     return null; // ambiguous = no gesture
 }
 function stableGesture(hand, idx) {
     const raw = classifyHand(hand);
     const s = gestureState[idx];
+    if(isDebug && raw) console.log(`Hand ${idx} raw gesture:`, raw, 'active:', s.active, 'candidate:', s.candidate, 'candidateCount:', s.candidateCount);
     if (raw && raw === s.active) {
         s.candidate = null;
         s.candidateCount = 0;
@@ -932,7 +1801,9 @@ function stableGesture(hand, idx) {
     // No active gesture yet — must reach CONFIRM_FRAMES of the same candidate.
     if (raw && raw === s.candidate) {
         s.candidateCount++;
+        if(isDebug) console.log(`Hand ${idx} ${raw} candidate count: ${s.candidateCount}/${CONFIRM_FRAMES}`);
         if (s.candidateCount >= CONFIRM_FRAMES) {
+            if(isDebug) console.log(`Hand ${idx} CONFIRMING gesture: ${raw}`);
             s.active = s.candidate;
             s.candidate = null;
             s.candidateCount = 0;
@@ -948,6 +1819,55 @@ function stableGesture(hand, idx) {
 function resetGestureState() {
     gestureState.forEach(s => { s.active=null; s.candidate=null; s.candidateCount=0; s.releaseCount=0; });
 }
+
+function summarizeGestureCommand(gestures, handCount) {
+    if (placementShape && (gestures[0] === 'pinch' || gestures[0] === 'cupped')) return `Command: place ${placementShape} (grab & mold)`;
+    if (gestureSelection.active && handCount === 1 && gestures[0] === 'pinch') {
+        if (interactionState.mode === 'detail') return 'Command: bevel selected patch';
+        if (interactionState.mode === 'form') return 'Command: extrude selected patch';
+        return 'Command: mold selected patch';
+    }
+    if (handCount === 2) {
+        if (gestures[0] === 'fist' && gestures[1] === 'cupped') return 'Command: freeze + mold (single-side)';
+        if (gestures[0] === 'cupped' && gestures[1] === 'fist') return 'Command: freeze + mold (single-side)';
+        if (gestures[0] === 'cupped' && gestures[1] === 'cupped') return 'Command: dual-mold (symmetric)';
+        if (gestures[0] === 'pinch' && gestures[1] === 'pinch') return 'Command: split / move';
+        if (gestures[0] === 'palm' && gestures[1] === 'palm') return 'Command: scale';
+    }
+    if (handCount === 1) {
+        if (gestures[0] === 'cupped') return 'Command: grab & mold';
+        if (gestures[0] === 'pinch') return 'Command: move / translate';
+        if (gestures[0] === 'palm') return 'Command: rotate';
+        if (gestures[0] === 'fist') return 'Command: freeze';
+    }
+    return 'Command: idle';
+}
+
+const GestureInterpreter = {
+    translateDeadZone: 0.015,
+    scaleDeadZone: 0.005,
+    depthDeadZone: 0.006,
+    intentForHand(hand, gesture) {
+        if (!hand || !gesture) return null;
+        const thumb = hand[4];
+        const index = hand[8];
+        const wrist = hand[0];
+        const anchorNdc = new THREE.Vector2(
+            -((((thumb.x + index.x) * 0.5) * 2) - 1),
+            -((((thumb.y + index.y) * 0.5) * 2) - 1),
+        );
+        const spread = Math.hypot(thumb.x - index.x, thumb.y - index.y, thumb.z - index.z);
+        const depthDelta = (thumb.z + index.z) * 0.5 - wrist.z;
+        return { gesture, confidence: 1, handCount: 1, anchorNdc, spread, depthDelta };
+    },
+    filteredScaleDelta(previousDistance, nextDistance) {
+        const delta = previousDistance - nextDistance;
+        return Math.abs(delta) < this.scaleDeadZone ? 0 : delta;
+    },
+    filteredDepthDelta(delta) {
+        return Math.abs(delta) < this.depthDeadZone ? 0 : delta;
+    },
+};
 
 // ============================================================
 // 6. SPLIT SYSTEM — two pinches apart splits mesh in half
@@ -1014,6 +1934,8 @@ function finalizeSplit() {
     mesh = splitRight;
     mesh.material = material;
     refreshWireframe();
+    rebuildTopologyCache();
+    SelectionController.clear();
 
     // Left half stays in scene as a grey ghost — clickable later
     const leftMat = material.clone();
@@ -1030,7 +1952,7 @@ function finalizeSplit() {
 // ============================================================
 // 7. RENDER LOOP — hands for rotate/scale/translate/split
 // ============================================================
-let lastPalm=[null,null], last2HDist=null, rotVX=0, rotVY=0;
+let lastPalm=[null,null], lastCuppedPos=[null,null], last2HDist=null, rotVX=0, rotVY=0;
 let lastFistZ=null;  // for blend-mode depth control via fist forward/back
 const _recenterTarget = new THREE.Vector3(0, 0, 0);
 
@@ -1052,51 +1974,78 @@ function loop() {
 
         // Debug
         if(isDebug){debugCanvas.width=innerWidth;debugCanvas.height=innerHeight;debugCtx.clearRect(0,0,debugCanvas.width,debugCanvas.height);debugCtx.save();debugCtx.translate(debugCanvas.width,0);debugCtx.scale(-1,1);debugCtx.globalAlpha=0.35;debugCtx.drawImage(video,0,0,debugCanvas.width,debugCanvas.height);debugCtx.restore();debugCtx.globalAlpha=1;
-        if(det.landmarks.length){let lb='';det.landmarks.forEach((h,i)=>{const m=h.map(l=>({...l,x:1-l.x}));drawUtils.drawConnectors(m,HandLandmarker.HAND_CONNECTIONS,{color:i?'#e66767':'#7b8b6f',lineWidth:3});drawUtils.drawLandmarks(m,{color:i?'#fffaec':'#f8eedb',fillColor:i?'#e66767':'#7b8b6f',radius:4});const g=gestureState[i].active;if(g==='fist')lb+='✊ Freeze  ';else if(g==='pinch')lb+='🤏 Move  ';else if(g==='palm')lb+='🤚 Rotate  ';else lb+='⏳ idle  ';});debugText.textContent=lb.trim();}else debugText.textContent='No hands';}
+        if(det.landmarks.length){let lb='';const activeGestures=[];det.landmarks.forEach((h,i)=>{const m=h.map(l=>({...l,x:1-l.x}));drawUtils.drawConnectors(m,HandLandmarker.HAND_CONNECTIONS,{color:i?'#e66767':'#7b8b6f',lineWidth:3});drawUtils.drawLandmarks(m,{color:i?'#fffaec':'#f8eedb',fillColor:i?'#e66767':'#7b8b6f',radius:4});const g=gestureState[i].active;activeGestures.push(g);if(g==='fist')lb+='✊ Freeze  ';else if(g==='pinch')lb+='🤏 Move  ';else if(g==='cupped')lb+='🖐️ Grab  ';else if(g==='palm')lb+='🤚 Rotate  ';else lb+='⏳ idle  ';});debugText.textContent=lb.trim();debugCommandText.textContent=summarizeGestureCommand(activeGestures, det.landmarks.length);}else {debugText.textContent='No hands';debugCommandText.textContent='Command: idle';}}
 
         if(det.landmarks.length) {
             // Run stability classifier on each detected hand BEFORE branching
             const gestures = det.landmarks.map((h, i) => stableGesture(h, i));
+            adaptModeFromGestures(gestures, det.landmarks.length);
             const anyActive = gestures.some(g => g !== null);
+            let hoverHit = null;
             if (anyActive) interacting = true;
 
             // ============================================================
             // GESTURE-DRIVEN SHAPE PLACEMENT
-            // When `placementShape` is set (user clicked ➕): a single-hand
-            // pinch raycasts onto the mesh and spawns a live preview.
-            //   • finger distance (thumb↔index)  → size
-            //   • hand z (forward/back) relative to pinch start → depth
-            //   • release pinch → instant commit (sticky mode keeps shape selected)
-            // While placing, all other gestures (translate, scale, rotate) are
-            // suppressed so they don't interfere.
+            // When `placementShape` is set (user clicked ➕):
+            // - PINCH: thumb-index pinch for precise placement
+            // - CUPPED: C-shaped grab for intuitive molding (spread of all fingers → size)
+            //   • finger spread (hand opening within cup) → size
+            //   • hand z (forward/back) relative to start → depth
+            //   • release gesture → instant commit
+            // While placing, all other gestures are suppressed.
             // ============================================================
-            if (placementShape && det.landmarks.length >= 1 && gestures[0] === 'pinch') {
+            if (interactionMode === 'freeze') {
+                holding = true;
+                lastPalm = [null, null];
+                last2HDist = null;
+                clearGestureSelection();
+            } else if (placementShape && det.landmarks.length >= 1 && (gestures[0] === 'pinch' || gestures[0] === 'cupped')) {
                 interacting = true; posActive = true;
+                hideGestureHover();
+                gestureSelectRings.forEach(r => r.visible = false);
+                if(isDebug) console.log('🎯 PLACEMENT ACTIVE - gesture:', gestures[0], 'shape:', placementShape);
                 const hand = det.landmarks[0];
-                const thumb = hand[4], index = hand[8];
-                // Pinch midpoint in normalized image coords (mirrored: flip x).
-                const px = (thumb.x + index.x) / 2;
-                const py = (thumb.y + index.y) / 2;
-                const pz = (thumb.z + index.z) / 2;
-                const fingerDist = Math.hypot(thumb.x - index.x, thumb.y - index.y, thumb.z - index.z);
 
-                // Raycast through the pinch midpoint to find the target surface point.
+                // Get hand center and finger spread differently for pinch vs cupped
+                let px, py, pz, fingerDist;
+                if (gestures[0] === 'pinch') {
+                    // Pinch: use thumb-index midpoint and their distance
+                    const thumb = hand[4], index = hand[8];
+                    px = (thumb.x + index.x) / 2;
+                    py = (thumb.y + index.y) / 2;
+                    pz = (thumb.z + index.z) / 2;
+                    fingerDist = Math.hypot(thumb.x - index.x, thumb.y - index.y, thumb.z - index.z);
+                } else {
+                    // Cupped: use palm center (wrist + middle finger middle knuckle average)
+                    // and use average finger spread as size control
+                    const wrist = hand[0], midFinger = hand[12];
+                    px = (wrist.x + midFinger.x) / 2;
+                    py = (wrist.y + midFinger.y) / 2;
+                    pz = (wrist.z + midFinger.z) / 2;
+                    // For cupped, measure spread: distance between thumb tip and pinky tip
+                    const thumb = hand[4], pinky = hand[20];
+                    fingerDist = Math.hypot(thumb.x - pinky.x, thumb.y - pinky.y, thumb.z - pinky.z);
+                }
+
+                // Raycast through the hand center to find the target surface point.
                 const ndc = new THREE.Vector2(-(px * 2 - 1), -(py * 2 - 1));
                 raycaster.setFromCamera(ndc, camera);
                 const hits = raycaster.intersectObject(mesh);
+                if(isDebug) console.log('🎯 Raycast hits:', hits.length, 'gesturePlacing:', gesturePlacing);
 
                 if (!gesturePlacing) {
-                    // First frame of pinch → spawn preview at the hit (if any).
+                    // First frame of gesture → spawn preview at the hit (if any).
                     if (hits.length) {
+                        if(isDebug) console.log('🎯✨ SPAWNING PREVIEW at hit point');
                         const inv = mesh.matrixWorld.clone().invert();
                         const lp = hits[0].point.clone().applyMatrix4(inv);
-                        const ln = hits[0].face.normal.clone().transformDirection(inv).normalize();
+                        const ln = getHitNormal(hits[0]).transformDirection(inv).normalize();
                         placementPos = { x: lp.x, y: lp.y, z: lp.z };
                         placementNormal = ln;
                         gesturePinchStartZ = pz;
                         gesturePinchStartDist = fingerDist;
-                        smoothedScale = 0.3;
-                        smoothedDepth = 0.5;
+                        smoothedScale = interactionState.placementSpec?.scale ?? 0.3;
+                        smoothedDepth = interactionState.placementSpec?.depth ?? 0.5;
                         const previewGeo = SHAPES[placementShape]();
                         if (placementPreview) {
                             scene.remove(placementPreview);
@@ -1108,11 +2057,11 @@ function loop() {
                         gesturePlacing = true;
                     }
                 } else {
-                    // While pinching: re-raycast to slide along surface (smoothed).
+                    // While gesturing: re-raycast to slide along surface (smoothed).
                     if (hits.length) {
                         const inv = mesh.matrixWorld.clone().invert();
                         const lp = hits[0].point.clone().applyMatrix4(inv);
-                        const ln = hits[0].face.normal.clone().transformDirection(inv).normalize();
+                        const ln = getHitNormal(hits[0]).transformDirection(inv).normalize();
                         // Lerp the local-anchor toward the new hit so the preview slides smoothly.
                         placementPos.x += (lp.x - placementPos.x) * 0.25;
                         placementPos.y += (lp.y - placementPos.y) * 0.25;
@@ -1120,12 +2069,20 @@ function loop() {
                         // Normal is also lerped & re-normalized to avoid pops at face boundaries.
                         placementNormal.lerp(ln, 0.25).normalize();
                     }
-                    // Target size from finger distance (clamped to 0.1..1.5).
-                    // Reference: ~0.04 = pinched closed, ~0.30 = wide spread.
-                    const targetScale = Math.max(0.1, Math.min(1.5, fingerDist * 5.0));
-                    smoothedScale += (targetScale - smoothedScale) * 0.25;
-                    // Target depth from hand z relative to pinch-start z.
-                    // MediaPipe: smaller z = closer to camera. Hand forward → push out → extrude.
+
+                    // Size scaling from finger spread
+                    if (gestures[0] === 'pinch') {
+                        // Pinch: ~0.04 = closed, ~0.30 = spread. Scale factor 5.0
+                        const targetScale = Math.max(0.1, Math.min(1.5, fingerDist * 5.0));
+                        smoothedScale += (targetScale - smoothedScale) * 0.25;
+                    } else {
+                        // Cupped: ~0.15 = partially closed, ~0.45 = wide spread. Scale factor 3.0
+                        const targetScale = Math.max(0.1, Math.min(1.5, fingerDist * 3.0));
+                        smoothedScale += (targetScale - smoothedScale) * 0.25;
+                    }
+
+                    // Target depth from hand z relative to gesture-start z.
+                    // Smaller z = closer to camera. Hand forward → push out → extrude.
                     const dz = gesturePinchStartZ - pz;       // positive = moved forward
                     const targetDepth = Math.max(-1, Math.min(1, 0.5 + dz * 12.0));
                     smoothedDepth += (targetDepth - smoothedDepth) * 0.20;
@@ -1135,10 +2092,47 @@ function loop() {
                 lastPalm = [null, null];
                 last2HDist = null;
             } else {
-                // Pinch released or no longer in placement mode → commit if we were placing.
+                // Gesture released or no longer in placement mode → commit if we were placing.
                 if (gesturePlacing) {
-                    gesturePlacing = false;
-                    commitPlacementBlended();
+                    if(isDebug) console.log('🎯 Gesture released → committing clean placement');
+                    commitGesturePlacement();
+                }
+                if (interactionState.activeOperation && gestures[0] !== 'pinch') {
+                    OperationController.commit();
+                }
+
+                // Gesture hover + pinch-once selection (only outside + placement mode).
+                if (!placementShape && det.landmarks.length === 1) {
+                    const h = det.landmarks[0];
+                    const g = gestures[0];
+                    const hx = (g === 'pinch') ? (h[4].x + h[8].x) * 0.5 : h[8].x;
+                    const hy = (g === 'pinch') ? (h[4].y + h[8].y) * 0.5 : h[8].y;
+                    const ndcHover = new THREE.Vector2(-(hx * 2 - 1), -(hy * 2 - 1));
+                    raycaster.setFromCamera(ndcHover, camera);
+                    const hoverHits = raycaster.intersectObject(mesh);
+                    if (hoverHits.length) {
+                        hoverHit = hoverHits[0];
+                        const r = Math.max(0.34, Math.min(1.4, brushRadius * 1.55));
+                        const inv = mesh.matrixWorld.clone().invert();
+                        const localPoint = hoverHit.point.clone().applyMatrix4(inv);
+                        const localNormal = getHitNormal(hoverHit).transformDirection(inv).normalize();
+                        showGestureHover(localPoint, localNormal, r);
+                    } else {
+                        hideGestureHover();
+                    }
+
+                    const pinchNow = (g === 'pinch');
+                    if (pinchNow && !pinchSelectLatch && hoverHit) {
+                        selectGestureRegion(hoverHit);
+                    }
+                    if (!pinchNow && !gestureSelection.active) hideGestureHover();
+                    pinchSelectLatch = pinchNow;
+                } else {
+                    hideGestureHover();
+                    pinchSelectLatch = false;
+                    pinchSculptLastZ = null;
+                    pinchSculptUndoArmed = false;
+                    if (!gestureSelection.active) gestureSelectRings.forEach(r => r.visible = false);
                 }
 
             // ----- Blend-mode depth control via fist forward/back (single-hand) -----
@@ -1165,12 +2159,97 @@ function loop() {
 
                 // Both open → SCALE
                 if(g1==='palm' && g2==='palm' && last2HDist!==null){
-                    const dd=last2HDist-d;
-                    if(Math.abs(dd)>0.005){let s=Math.max(0.2,Math.min(5,mesh.scale.x-dd*0.8));mesh.scale.set(s,s,s);rotVX=0;rotVY=0;}
+                    const dd = GestureInterpreter.filteredScaleDelta(last2HDist, d);
+                    if(dd){let s=Math.max(0.2,Math.min(5,mesh.scale.x-dd*0.8));mesh.scale.setScalar(THREE.MathUtils.lerp(mesh.scale.x, s, 0.45));rotVX=0;rotVY=0;}
                     posActive = true;
                 }
+
+                // ============= TWO-HAND MOLDING PATTERNS =============
+
+                // Freeze + Cupped: One hand holds (fist), other hand sculpts (cupped)
+                // → Single-sided molding: place/sculpt on one region while anchored by freeze hand
+                if ((g1 === 'fist' && g2 === 'cupped') || (g1 === 'cupped' && g2 === 'fist')) {
+                    rotVX = 0; rotVY = 0;  // Freeze rotation
+                    posActive = true;
+                    // The cupped hand drives placement/sculpting; fist hand acts as anchor
+                    const cuppedHand = (g1 === 'cupped') ? h1 : h2;
+                    const wrist = cuppedHand[0], midFinger = cuppedHand[12];
+                    const px = (wrist.x + midFinger.x) / 2;
+                    const py = (wrist.y + midFinger.y) / 2;
+                    const thumb = cuppedHand[4], pinky = cuppedHand[20];
+                    const fingerSpread = Math.hypot(thumb.x - pinky.x, thumb.y - pinky.y, thumb.z - pinky.z);
+
+                    // Raycast for sculpting position
+                    const ndc = new THREE.Vector2(-(px * 2 - 1), -(py * 2 - 1));
+                    raycaster.setFromCamera(ndc, camera);
+                    const hits = raycaster.intersectObject(mesh);
+                    if (hits.length) {
+                        // Motion-driven molding: drag the clay with the cupped hand.
+                        const prev = lastCuppedPos[g1 === 'cupped' ? 0 : 1];
+                        const oldR = brushRadius;
+                        brushRadius = Math.max(0.2, Math.min(1.0, fingerSpread * 2.5));
+                        if (prev) {
+                            const dx = (px - prev.x) * innerWidth;
+                            const dy = (py - prev.y) * innerHeight;
+                            if (gestureSelection.active) {
+                                moveSelectedPatchByScreenDelta(dx, dy);
+                                syncSelectionAfterGeometryChange(false);
+                            } else {
+                                grabAt(hits[0].point, dx, dy);
+                            }
+                        } else {
+                            smoothAt(hits[0].point);
+                        }
+                        brushRadius = oldR;
+                    }
+                    lastCuppedPos[g1 === 'cupped' ? 0 : 1] = { x: px, y: py };
+                    // Visual feedback: debug command shows freeze+mold pattern
+                }
+
+                // Dual Cupped: Both hands cupped → Symmetric molding on both sides
+                // → Multi-region molding: sculpt mirror-symmetric or independent regions
+                else if (g1 === 'cupped' && g2 === 'cupped') {
+                    rotVX = 0; rotVY = 0;  // Freeze rotation for stability
+                    posActive = true;
+
+                    // Both hands drive sculpting on their respective regions
+                    for (let h = 0; h < 2; h++) {
+                        const hand = (h === 0) ? h1 : h2;
+                        const wrist = hand[0], midFinger = hand[12];
+                        const px = (wrist.x + midFinger.x) / 2;
+                        const py = (wrist.y + midFinger.y) / 2;
+                        const thumb = hand[4], pinky = hand[20];
+                        const fingerSpread = Math.hypot(thumb.x - pinky.x, thumb.y - pinky.y, thumb.z - pinky.z);
+
+                        const ndc = new THREE.Vector2(-(px * 2 - 1), -(py * 2 - 1));
+                        raycaster.setFromCamera(ndc, camera);
+                        const hits = raycaster.intersectObject(mesh);
+                        if (hits.length) {
+                            // Each cupped hand deforms independently based on its motion.
+                            const prev = lastCuppedPos[h];
+                            const oldR = brushRadius;
+                            brushRadius = Math.max(0.2, Math.min(1.0, fingerSpread * 2.5));
+                            if (prev) {
+                                const dx = (px - prev.x) * innerWidth;
+                                const dy = (py - prev.y) * innerHeight;
+                                if (gestureSelection.active) {
+                                    moveSelectedPatchByScreenDelta(dx, dy);
+                                    syncSelectionAfterGeometryChange(false);
+                                } else {
+                                    grabAt(hits[0].point, dx, dy);
+                                }
+                            } else {
+                                smoothAt(hits[0].point);
+                            }
+                            brushRadius = oldR;
+                        }
+                        lastCuppedPos[h] = { x: px, y: py };
+                    }
+                    // Visual feedback: debug command shows dual-mold pattern
+                }
+
                 // Both pinch → TRANSLATE or SPLIT
-                if(g1==='pinch' && g2==='pinch'){
+                else if(g1==='pinch' && g2==='pinch'){
                     if(splitActive){
                         // Move halves apart based on hand distance
                         const spread=(d-splitStartDist)*3.0;
@@ -1186,7 +2265,8 @@ function loop() {
                         // Normal translate
                         const px=(h1[4].x+h1[8].x+h2[4].x+h2[8].x)/4;
                         const py=(h1[4].y+h1[8].y+h2[4].y+h2[8].y)/4;
-                        const v=new THREE.Vector3(-(px*2-1),-(py*2-1),0.5).unproject(camera);
+                        const intent = GestureInterpreter.intentForHand({ 4: { x: px, y: py, z: 0 }, 8: { x: px, y: py, z: 0 }, 0: { z: 0 } }, 'pinch');
+                        const v=new THREE.Vector3(intent.anchorNdc.x,intent.anchorNdc.y,0.5).unproject(camera);
                         v.sub(camera.position).normalize();
                         const t=(mesh.position.z-camera.position.z)/v.z;
                         mesh.position.lerp(camera.position.clone().add(v.multiplyScalar(t)),0.2);
@@ -1212,20 +2292,85 @@ function loop() {
 
                 // Single pinch → TRANSLATE
                 if(g==='pinch'){
+                    const intent = GestureInterpreter.intentForHand(hand, g);
                     const px=(hand[4].x+hand[8].x)/2,py=(hand[4].y+hand[8].y)/2;
-                    const ndc=new THREE.Vector2(-(px*2-1),-(py*2-1));
-                    const v=new THREE.Vector3(ndc.x,ndc.y,0.5).unproject(camera);
-                    v.sub(camera.position).normalize();
-                    const t=(mesh.position.z-camera.position.z)/v.z;
-                    mesh.position.lerp(camera.position.clone().add(v.multiplyScalar(t)),0.15);
+                    const pinchZ = (hand[4].z + hand[8].z) * 0.5;
+
+                    if (gestureSelection.active && idx === 0) {
+                        sculptSelectedRegion(pinchZ);
+
+                        if (hoverHit) {
+                            const inv = mesh.matrixWorld.clone().invert();
+                            const nextPoint = hoverHit.point.clone().applyMatrix4(inv);
+                            const nextNormal = getHitNormal(hoverHit).transformDirection(inv).normalize();
+                            gestureSelection.pointLocal.lerp(nextPoint, 0.22);
+                            gestureSelection.normalLocal.lerp(nextNormal, 0.22).normalize();
+                        }
+                        updateGestureSelectionViz();
+                        lastPalm[idx]=null;rotVX=0;rotVY=0;
+                        posActive = true;
+                    } else {
+                        const ndc=intent.anchorNdc;
+                        const v=new THREE.Vector3(ndc.x,ndc.y,0.5).unproject(camera);
+                        v.sub(camera.position).normalize();
+                        const t=(mesh.position.z-camera.position.z)/v.z;
+                        mesh.position.lerp(camera.position.clone().add(v.multiplyScalar(t)),0.15);
+                        pinchSculptLastZ = null;
+                        pinchSculptUndoArmed = false;
+                        lastPalm[idx]=null;rotVX=0;rotVY=0;
+                        posActive = true;
+                    }
+                }
+                // Single cupped → GENTLE SCULPT / MOLD
+                else if(g==='cupped'){
+                    // Use cupped hand to sculpt softly (smoothing, molding)
+                    const wrist = hand[0], midFinger = hand[12];
+                    const px = (wrist.x + midFinger.x) / 2;
+                    const py = (wrist.y + midFinger.y) / 2;
+                    const thumb = hand[4], pinky = hand[20];
+                    const fingerSpread = Math.hypot(thumb.x - pinky.x, thumb.y - pinky.y, thumb.z - pinky.z);
+
+                    const ndc = new THREE.Vector2(-(px * 2 - 1), -(py * 2 - 1));
+                    raycaster.setFromCamera(ndc, camera);
+                    const hits = raycaster.intersectObject(mesh);
+                    if (hits.length) {
+                        // Drag the surface with the cupped hand so molding is visible.
+                        const prev = lastCuppedPos[idx];
+                        const oldR = brushRadius;
+                        brushRadius = Math.max(0.3, Math.min(1.2, fingerSpread * 2.5));
+                        if (prev) {
+                            const dx = (px - prev.x) * innerWidth;
+                            const dy = (py - prev.y) * innerHeight;
+                            if (gestureSelection.active) {
+                                moveSelectedPatchByScreenDelta(dx, dy);
+                                syncSelectionAfterGeometryChange(false);
+                            } else {
+                                grabAt(hits[0].point, dx, dy);
+                            }
+                        } else {
+                            smoothAt(hits[0].point);
+                        }
+                        brushRadius = oldR;
+                    }
+                    lastCuppedPos[idx] = { x: px, y: py };
                     lastPalm[idx]=null;rotVX=0;rotVY=0;
                     posActive = true;
                 }
                 // Open palm → ROTATE
                 else if(g==='palm'){
+                    pinchSculptLastZ = null;
+                    pinchSculptUndoArmed = false;
+                    if (interactionState.activeOperation) OperationController.commit();
+                    lastCuppedPos[idx] = null;
                     if(lastPalm[idx]){const dx=palm.x-lastPalm[idx].x,dy=palm.y-lastPalm[idx].y;rotVX-=dx*5;rotVY+=dy*5;}
                     lastPalm[idx]=palm;
-                } else lastPalm[idx]=null;
+                } else {
+                    pinchSculptLastZ = null;
+                    pinchSculptUndoArmed = false;
+                    if (interactionState.activeOperation) OperationController.commit();
+                    lastPalm[idx]=null; lastCuppedPos[idx]=null;
+                    if (gestureSelection.active && g === null) hideGestureHover();
+                }
             });
             }  // ← close `else` of placement-mode interception
         } else {
@@ -1233,13 +2378,16 @@ function loop() {
             // so the user doesn't get stuck with a floating ghost shape.
             if (gesturePlacing) {
                 gesturePlacing = false;
-                commitPlacementBlended();
+                commitGesturePlacement();
             }
-            lastPalm=[null,null]; resetGestureState();
+            if (interactionState.activeOperation) OperationController.commit();
+            lastPalm=[null,null];
+            lastCuppedPos=[null,null];
+            resetGestureState();
         }
     }
 
-    if(holding){rotVX=0;rotVY=0;}
+    if(holding || interactionMode === 'freeze'){rotVX=0;rotVY=0;}
     mesh.rotation.y+=rotVX;mesh.rotation.x+=rotVY;
     rotVX*=0.85;rotVY*=0.85;
     if(!interacting&&Math.abs(rotVX)<0.01)mesh.rotation.y+=0.002;
@@ -1257,6 +2405,7 @@ function loop() {
 // 8. MOUSE SCULPTING
 // ============================================================
 let mDown=false, mBtn=-1, mLast={x:0,y:0}, mOnMesh=false, mUndoSaved=false;
+let mouseOperationStartY = 0;
 window.addEventListener('contextmenu',e=>e.preventDefault());
 
 window.addEventListener('mousedown',e=>{
@@ -1268,18 +2417,20 @@ window.addEventListener('mousedown',e=>{
         if(h.length){
             const inv=mesh.matrixWorld.clone().invert();
             const lp=h[0].point.clone().applyMatrix4(inv);
-            const ln=h[0].face.normal.clone().transformDirection(inv).normalize();
+            const ln=getHitNormal(h[0]).transformDirection(inv).normalize();
             placementPos = { x: lp.x, y: lp.y, z: lp.z };
             placementNormal = ln;
             placementStartY = e.clientY;
             placementStartX = e.clientX;
             placementDragging = true;
-            blendDepth = 0.5;  // start half-buried for natural merge
-            // Create preview at default size 0.3, half-buried.
+            blendDepth = interactionState.placementSpec?.depth ?? 0.5;
+            blendStrength = interactionState.placementSpec?.blendStrength ?? 0.7;
+            // Create preview using the current placement spec.
             const previewGeo = SHAPES[placementShape]();
             placementPreview = new THREE.Mesh(previewGeo, previewMat);
-            const initS = 0.3, initDepth = 0.5;
-            const offWorld = h[0].face.normal.clone().normalize().multiplyScalar(initS * initDepth);
+            const initS = interactionState.placementSpec?.scale ?? 0.3;
+            const initDepth = interactionState.placementSpec?.depth ?? 0.5;
+            const offWorld = getHitNormal(h[0]).normalize().multiplyScalar(initS * initDepth);
             placementPreview.position.copy(h[0].point).add(offWorld);
             placementPreview.scale.setScalar(initS);
             scene.add(placementPreview);
@@ -1290,7 +2441,15 @@ window.addEventListener('mousedown',e=>{
     mDown=true;mBtn=e.button;mUndoSaved=false;mLast={x:e.clientX,y:e.clientY};
     const nx=(e.clientX/innerWidth)*2-1,ny=-(e.clientY/innerHeight)*2+1;
     raycaster.setFromCamera(new THREE.Vector2(nx,ny),camera);
-    mOnMesh=raycaster.intersectObject(mesh).length>0;
+    const hits = raycaster.intersectObject(mesh);
+    mOnMesh=hits.length>0;
+    if (mOnMesh && mBtn === 0 && (interactionMode === 'form' || interactionMode === 'detail')) {
+        SelectionController.selectHit(hits[0], Math.max(0.34, Math.min(1.45, brushRadius * 1.65)));
+        mouseOperationStartY = e.clientY;
+        const opId = interactionMode === 'detail' ? 'bevel-lite' : 'extrude-lite';
+        OperationController.begin(opId, { source: 'mouse' });
+        return;
+    }
     if(mOnMesh&&mBtn!==1){saveUndo();mUndoSaved=true;}
 });
 
@@ -1303,13 +2462,45 @@ window.addEventListener('mousemove',e=>{
     const nx=(e.clientX/innerWidth)*2-1,ny=-(e.clientY/innerHeight)*2+1;
     raycaster.setFromCamera(new THREE.Vector2(nx,ny),camera);
     const hits=raycaster.intersectObject(mesh);
-    if(!mDown){if(hits.length)showBrush(hits[0].point,hits[0].face.normal);else hideBrush();return;}
+    if(!mDown){
+        if(hits.length){
+            showBrush(hits[0].point,getHitNormal(hits[0]));
+            if (interactionMode === 'form' || interactionMode === 'detail') {
+                const inv = mesh.matrixWorld.clone().invert();
+                showGestureHover(hits[0].point.clone().applyMatrix4(inv), getHitNormal(hits[0]).transformDirection(inv).normalize(), Math.max(0.34, Math.min(1.4, brushRadius * 1.45)));
+            }
+        } else {
+            hideBrush();
+            if (!gestureSelection.active) hideGestureHover();
+        }
+        return;
+    }
     const dx=e.clientX-mLast.x,dy=e.clientY-mLast.y;mLast={x:e.clientX,y:e.clientY};
+    if (interactionState.activeOperation && (interactionMode === 'form' || interactionMode === 'detail')) {
+        const nextValue = (mouseOperationStartY - e.clientY) * 0.006;
+        OperationController.update(nextValue);
+        return;
+    }
     if(!mOnMesh||mBtn===1){rotVX+=dx*0.003;rotVY+=dy*0.003;}
     else if(hits.length){
-        showBrush(hits[0].point,hits[0].face.normal);
-        if(e.shiftKey){smoothAt(hits[0].point);}
-        else{const saved=activeTool;if(mBtn===2){if(activeTool==='pull')activeTool='push';else if(activeTool==='push')activeTool='pull';}applyTool(hits[0],dx,dy);activeTool=saved;}
+        if (interactionMode === 'freeze') return;
+        if (interactionMode === 'select') {
+            rotVX += dx * 0.003;
+            rotVY += dy * 0.003;
+            return;
+        }
+        showBrush(hits[0].point,getHitNormal(hits[0]));
+        if(e.shiftKey){
+            if (gestureSelection.active) applyToolToSelection(dx, dy);
+            else smoothAt(hits[0].point);
+        }
+        else{
+            const saved=activeTool;
+            if(mBtn===2){if(activeTool==='pull')activeTool='push';else if(activeTool==='push')activeTool='pull';}
+            if (gestureSelection.active && interactionMode === 'sculpt') applyToolToSelection(dx, dy);
+            else applyTool(hits[0],dx,dy);
+            activeTool=saved;
+        }
     }
 });
 
@@ -1320,11 +2511,174 @@ window.addEventListener('mouseup',()=>{
         commitPlacementBlended();
         return;
     }
+    if (interactionState.activeOperation) OperationController.commit();
     mDown=false;mBtn=-1;mOnMesh=false;mUndoSaved=false;
 });
 window.addEventListener('wheel',e=>{brushRadius=Math.max(0.1,Math.min(1.5,brushRadius-e.deltaY*0.001));document.getElementById('br').value=brushRadius;document.getElementById('brv').textContent=brushRadius.toFixed(2);});
 
 initHands();
+
+// ============================================================
+// 8b. SPLICE-STYLE TOOLBAR WIRING
+// ============================================================
+let interactionMode = 'select';
+let gestureAdaptiveMode = true;
+const modeHintEl = document.getElementById('mode-hint');
+const modeButtons = Array.from(document.querySelectorAll('.splice-mode-btn'));
+const spliceAddBtn = document.getElementById('splice-add-btn');
+const spliceDuplicateBtn = document.getElementById('splice-duplicate-btn');
+const shapeTrigger = document.getElementById('splice-shape-trigger');
+const shapeMenu = document.getElementById('splice-shape-menu');
+shapeLabel = document.getElementById('splice-shape-label');
+shapeItems = Array.from(document.querySelectorAll('.splice-shape-item'));
+
+const MODE_LABELS = {
+    select: 'Navigate',
+    sculpt: 'Sculpt',
+    form: 'Form',
+    detail: 'Detail',
+    freeze: 'Freeze',
+    add: 'Place',
+};
+const MODE_ICONS = {
+    select: '↖',
+    sculpt: '✋',
+    form: '✍',
+    detail: '◌',
+    freeze: '✊',
+    add: '▷',
+};
+
+const MODE_TOOL = {
+    sculpt: 'pull',
+    form: 'grab',
+    detail: 'crease',
+};
+
+function syncShapeUi(name) {
+    if (shapeLabel) {
+        shapeLabel.textContent = SHAPE_LABELS[name] || name;
+    }
+    shapeItems.forEach(item => item.classList.toggle('active', item.dataset.shape === name));
+    document.querySelectorAll('[data-shape-swap]').forEach(btn => {
+        btn.style.borderWidth = btn.dataset.shapeSwap === name ? '3px' : '1.5px';
+    });
+}
+
+function syncModeUi(source = 'ui') {
+    modeButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.mode === interactionMode));
+    if (modeHintEl) {
+        const locked = performance.now() < modeLockUntil;
+        const lead = source === 'gesture'
+            ? 'Mode: ' + MODE_LABELS[interactionMode] + ' · by gesture'
+            : 'Mode: ' + MODE_LABELS[interactionMode] + (locked ? ' · locked' : ' · gesture adaptive');
+        modeHintEl.textContent = lead;
+    }
+    if (gestureSelection.active) updateGestureSelectionViz();
+}
+
+function setInteractionMode(mode, source = 'ui') {
+    if (!MODE_LABELS[mode]) return;
+    if (source === 'gesture' && performance.now() < modeLockUntil) return;
+    if (interactionMode === mode) {
+        if (mode === 'add' && !placementShape) startPlacement(currentShape);
+        return;
+    }
+    interactionMode = mode;
+    interactionState.mode = mode;
+    if (source === 'ui') modeLockUntil = performance.now() + GESTURE_TUNING.modeLockMs;
+
+    if (mode === 'add') {
+        if (!placementShape) startPlacement(currentShape);
+    } else if (placementShape && !gesturePlacing) {
+        cancelPlacement();
+    }
+
+    if (MODE_TOOL[mode]) setActiveTool(MODE_TOOL[mode]);
+    if (mode === 'freeze') setCommandStatus('Freeze mode: motion locked');
+    else setCommandStatus('Mode: ' + MODE_LABELS[mode]);
+    syncModeUi(source);
+}
+
+modeButtons.forEach(btn => {
+    const mode = btn.dataset.mode;
+    btn.innerHTML = `<span class="splice-mode-icon">${MODE_ICONS[mode] || ''}</span><span class="splice-mode-name">${MODE_LABELS[mode] || mode}</span>`;
+});
+interactionState.mode = interactionMode;
+
+function adaptModeFromGestures(gestures, handCount) {
+    if (!gestureAdaptiveMode || !handsEnabled || placementShape || blendPanel.classList.contains('open')) return;
+    if (handCount === 2 && gestures[0] === 'palm' && gestures[1] === 'palm') {
+        setInteractionMode('select', 'gesture');
+        return;
+    }
+    if (gestures.includes('fist')) {
+        setInteractionMode('freeze', 'gesture');
+        return;
+    }
+    if (gestures.includes('cupped')) {
+        setInteractionMode('sculpt', 'gesture');
+        return;
+    }
+    if (gestures.includes('pinch')) {
+        setInteractionMode('form', 'gesture');
+        return;
+    }
+    if (gestures.includes('palm')) {
+        setInteractionMode('select', 'gesture');
+    }
+}
+
+if (shapeTrigger && shapeMenu) {
+    shapeTrigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const willOpen = !shapeMenu.classList.contains('open');
+        shapeMenu.classList.toggle('open', willOpen);
+        shapeTrigger.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    });
+    document.addEventListener('click', () => {
+        shapeMenu.classList.remove('open');
+        shapeTrigger.setAttribute('aria-expanded', 'false');
+    });
+    shapeMenu.addEventListener('click', (e) => e.stopPropagation());
+}
+
+shapeItems.forEach(item => {
+    item.addEventListener('click', () => {
+        const nextShape = item.dataset.shape;
+        if (!SHAPES[nextShape]) return;
+        saveUndo();
+        setShape(nextShape);
+        shapeMenu.classList.remove('open');
+        shapeTrigger.setAttribute('aria-expanded', 'false');
+        if (interactionMode === 'add') {
+            cancelPlacement();
+            startPlacement(nextShape);
+        }
+        setCommandStatus('Picked up: ' + (SHAPE_LABELS[nextShape] || nextShape));
+    });
+});
+
+if (spliceAddBtn) {
+    spliceAddBtn.addEventListener('click', () => {
+        setInteractionMode('add', 'ui');
+    });
+}
+
+if (spliceDuplicateBtn) {
+    spliceDuplicateBtn.addEventListener('click', () => {
+        if (!beginDuplicatePlacement()) setCommandStatus('Duplicate Last needs a placed shape first');
+    });
+}
+
+modeButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+        setInteractionMode(btn.dataset.mode, 'ui');
+    });
+});
+
+syncModeUi('ui');
+syncShapeUi(currentShape);
 
 // ============================================================
 // 9. CAT AI (Boba)
@@ -1333,29 +2687,45 @@ const chatInput=document.getElementById('chat-input'),sendBtn=document.getElemen
 const catDialogue=document.getElementById('cat-dialogue'),chatHistoryContainer=document.getElementById('chat-history-container');
 const chatHistory=document.getElementById('chat-history'),toggleHistoryBtn=document.getElementById('toggle-history-btn');
 const bgMusic=document.getElementById('bg-music'),musicToggleBtn=document.getElementById('music-toggle-btn');
+const quickCommandButtons=document.querySelectorAll('[data-quick-command]');
+const commandStatus=document.getElementById('command-status');
 let isMusicPlaying=false;bgMusic.volume=0.2;
 musicToggleBtn.addEventListener('click',()=>{if(isMusicPlaying){bgMusic.pause();musicToggleBtn.textContent='🔇 Music Off';}else{bgMusic.play().catch(()=>{});musicToggleBtn.textContent='🎵 Music On';}isMusicPlaying=!isMusicPlaying;});
 let isHistoryOpen=false;
 
+function setCommandStatus(text) {
+    if (commandStatus) commandStatus.textContent = text;
+}
+
+function runQuickCommand(commandText) {
+    chatInput.value = commandText;
+    catCmd(commandText);
+    chatInput.value = '';
+}
+
+quickCommandButtons.forEach(button => {
+    button.addEventListener('click', () => runQuickCommand(button.dataset.quickCommand));
+});
+
 function catCmd(cmd){
     const lc=cmd.toLowerCase();let resp='',done=false;
-    for(const n of Object.keys(SHAPES)){if(lc.includes(n)){saveUndo();setShape(n);resp=`Switched to ${n}! 🎨`;done=true;break;}}
-    if(!done&&/\b(reset|new|restart|clear)\b/i.test(lc)){saveUndo();resp="Fresh! 🆕";setShape(currentShape);done=true;}
-    else if(!done&&/\b(bigger|larger|grow|expand)\b/i.test(lc)){saveUndo();resp="Growing!";mesh.scale.multiplyScalar(1.3);done=true;}
-    else if(!done&&/\b(smaller|tiny|shrink)\b/i.test(lc)){saveUndo();resp="Shrinking!";mesh.scale.multiplyScalar(0.7);done=true;}
-    else if(!done&&/\b(red|pink)\b/i.test(lc)){saveUndo();material.color.setHex(0xe66767);resp="Red! 🍓";done=true;}
-    else if(!done&&/\b(blue|azure)\b/i.test(lc)){saveUndo();material.color.setHex(0xa8c3e6);resp="Blue! 🫐";done=true;}
-    else if(!done&&/\b(green|sage)\b/i.test(lc)){saveUndo();material.color.setHex(0x9cb89c);resp="Green! 🌿";done=true;}
-    else if(!done&&/\b(yellow|gold)\b/i.test(lc)){saveUndo();material.color.setHex(0xf4d03f);resp="Yellow! ☀️";done=true;}
-    else if(!done&&/\b(white|cream)\b/i.test(lc)){saveUndo();material.color.setHex(0xfffaec);resp="White! 🥛";done=true;}
-    else if(!done&&/\b(dark|black)\b/i.test(lc)){saveUndo();material.color.setHex(0x333333);resp="Dark! 🐈‍⬛";done=true;}
-    else if(!done&&/\b(metal|shiny)\b/i.test(lc)){saveUndo();material.metalness=0.8;material.roughness=0.1;material.needsUpdate=true;resp="Shiny! ✨";done=true;}
-    else if(!done&&/\b(matte|clay)\b/i.test(lc)){saveUndo();material.metalness=0.1;material.roughness=0.8;material.needsUpdate=true;resp="Matte! 🧱";done=true;}
-    else if(!done&&/\b(glass|transparent)\b/i.test(lc)){saveUndo();material.transparent=true;material.opacity=0.5;material.metalness=1;material.roughness=0;material.needsUpdate=true;resp="Glass! 🧊";done=true;}
-    else if(!done&&/\b(wireframe|lines)\b/i.test(lc)){saveUndo();material.wireframe=!material.wireframe;material.needsUpdate=true;resp="Wireframe! 📐";done=true;}
-    else if(!done&&/\b(export|stl|print)\b/i.test(lc)){document.getElementById('export-btn').click();resp="Exporting STL! 💾";done=true;}
-    else if(!done&&(/\b(help|how)\b/i.test(lc)||cmd.length>25)){resp="Mouse: left=pull, right=push, shift=smooth. Hands: palm=rotate, pinch=move, two palms=scale, two pinches apart=split. Try shapes, colors, 'export stl'!";done=true;}
-    if(!done)resp="Meow? Try shapes (sphere,cube,torus), colors, 'export stl', or 'reset'!";
+    for(const n of Object.keys(SHAPES)){if(lc.includes(n)){saveUndo();setShape(n);resp=`Switched to ${n}! 🎨`;done=true;setCommandStatus(`Picked up: ${n}`);break;}}
+    if(!done&&/\b(reset|new|restart|clear)\b/i.test(lc)){saveUndo();resp="Fresh! 🆕";setShape(currentShape);done=true;setCommandStatus('Picked up: reset');}
+    else if(!done&&/\b(bigger|larger|grow|expand)\b/i.test(lc)){saveUndo();resp="Growing!";mesh.scale.multiplyScalar(1.3);done=true;setCommandStatus('Picked up: scale up');}
+    else if(!done&&/\b(smaller|tiny|shrink)\b/i.test(lc)){saveUndo();resp="Shrinking!";mesh.scale.multiplyScalar(0.7);done=true;setCommandStatus('Picked up: scale down');}
+    else if(!done&&/\b(red|pink)\b/i.test(lc)){saveUndo();material.color.setHex(0xe66767);resp="Red! 🍓";done=true;setCommandStatus('Picked up: red');}
+    else if(!done&&/\b(blue|azure)\b/i.test(lc)){saveUndo();material.color.setHex(0xa8c3e6);resp="Blue! 🫐";done=true;setCommandStatus('Picked up: blue');}
+    else if(!done&&/\b(green|sage)\b/i.test(lc)){saveUndo();material.color.setHex(0x9cb89c);resp="Green! 🌿";done=true;setCommandStatus('Picked up: sage green');}
+    else if(!done&&/\b(yellow|gold)\b/i.test(lc)){saveUndo();material.color.setHex(0xf4d03f);resp="Yellow! ☀️";done=true;setCommandStatus('Picked up: yellow');}
+    else if(!done&&/\b(white|cream)\b/i.test(lc)){saveUndo();material.color.setHex(0xfffaec);resp="White! 🥛";done=true;setCommandStatus('Picked up: cream');}
+    else if(!done&&/\b(dark|black)\b/i.test(lc)){saveUndo();material.color.setHex(0x333333);resp="Dark! 🐈‍⬛";done=true;setCommandStatus('Picked up: dark');}
+    else if(!done&&/\b(metal|shiny)\b/i.test(lc)){saveUndo();material.metalness=0.8;material.roughness=0.1;material.needsUpdate=true;resp="Shiny! ✨";done=true;setCommandStatus('Picked up: metal');}
+    else if(!done&&/\b(matte|clay)\b/i.test(lc)){saveUndo();material.metalness=0.1;material.roughness=0.8;material.needsUpdate=true;resp="Matte! 🧱";done=true;setCommandStatus('Picked up: matte clay');}
+    else if(!done&&/\b(glass|transparent)\b/i.test(lc)){saveUndo();material.transparent=true;material.opacity=0.5;material.metalness=1;material.roughness=0;material.needsUpdate=true;resp="Glass! 🧊";done=true;setCommandStatus('Picked up: glass');}
+    else if(!done&&/\b(wireframe|lines)\b/i.test(lc)){saveUndo();material.wireframe=!material.wireframe;material.needsUpdate=true;resp="Wireframe! 📐";done=true;setCommandStatus('Picked up: wireframe');}
+    else if(!done&&/\b(export|stl|print)\b/i.test(lc)){document.getElementById('export-btn').click();resp="Exporting STL! 💾";done=true;setCommandStatus('Picked up: export STL');}
+    else if(!done&&(/\b(help|how)\b/i.test(lc)||cmd.length>25)){resp="Mouse: left=pull, right=push, shift=smooth. Hands: palm=rotate, pinch=move, two palms=scale, two pinches apart=split. Try shapes, colors, 'export stl'!";done=true;setCommandStatus('Picked up: help');}
+    if(!done){resp="Meow? Try shapes (sphere,cube,torus), colors, 'export stl', or 'reset'!";setCommandStatus('Command idle');}
     catDialogue.style.opacity=0;setTimeout(()=>{catDialogue.style.opacity=1;catDialogue.innerHTML=`<em>"${resp}"</em>`;const u=document.createElement("li");u.className="history-user";u.textContent=`You: "${cmd}"`;const b=document.createElement("li");b.className="history-cat";b.textContent=`Cat: "${resp}"`;chatHistory.appendChild(u);chatHistory.appendChild(b);chatHistoryContainer.scrollTop=chatHistoryContainer.scrollHeight;},200);
 }
 
@@ -1400,10 +2770,14 @@ document.querySelectorAll('.ws-btn').forEach(b => {
         <div id="scan-modal-inner">
             <h2>📷 Object Scanner</h2>
             <p>Hold a real object in front of the camera against a plain, uniformly-lit background.
-               Adjust the threshold so only the object stays pink in the preview, then capture.</p>
+               Move the object closer to the camera and keep it centered. Adjust the threshold so only the object stays pink in the preview, then capture.</p>
             <div id="scan-video-wrap">
                 <video id="scan-video" autoplay playsinline muted></video>
                 <canvas id="scan-preview"></canvas>
+                <canvas id="scan-frame"></canvas>
+                <div id="scan-guide">
+                    <span>Keep the object and both hands inside this frame</span>
+                </div>
             </div>
             <div id="scan-threshold-row">
                 <label for="scan-threshold">Threshold</label>
@@ -1421,11 +2795,25 @@ document.querySelectorAll('.ws-btn').forEach(b => {
 
     const scanVideo = modal.querySelector('#scan-video');
     const scanPreview = modal.querySelector('#scan-preview');
+    const scanFrame = modal.querySelector('#scan-frame');
+    const scanGuide = modal.querySelector('#scan-guide');
     const scanThresh = modal.querySelector('#scan-threshold');
     const scanThreshV = modal.querySelector('#scan-threshold-v');
     const scanStatus = modal.querySelector('#scan-status');
     const scanCapture = modal.querySelector('#scan-capture');
     const scanClose = modal.querySelector('#scan-close');
+
+    // Verify guide is visible
+    if (scanGuide) {
+        setTimeout(() => {
+            const rect = scanGuide.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) {
+                scanGuide.style.opacity = '1';
+                scanGuide.style.visibility = 'visible';
+                scanGuide.style.display = 'block';
+            }
+        }, 100);
+    }
 
     let scanStream = null;
     let previewRAF = 0;
@@ -1449,6 +2837,8 @@ document.querySelectorAll('.ws-btn').forEach(b => {
             await scanVideo.play();
             scanPreview.width = scanVideo.videoWidth || 640;
             scanPreview.height = scanVideo.videoHeight || 480;
+            scanFrame.width = scanPreview.width;
+            scanFrame.height = scanPreview.height;
             scanStatus.textContent = 'Adjust the threshold so the object glows pink, then capture.';
             startPreviewLoop();
         } catch (err) {
@@ -1481,17 +2871,118 @@ document.querySelectorAll('.ws-btn').forEach(b => {
         return [r / samples.length, g / samples.length, b / samples.length];
     }
 
-    // Build foreground mask: pixel is FG if it differs from background by more than `thresh`.
-    function buildMask(imgData, thresh) {
+    function getScanFocusRegion(videoEl, width, height) {
+        if (!handLandmarker || !videoEl || videoEl.readyState < 2) return null;
+        try {
+            const detected = handLandmarker.detectForVideo(videoEl, performance.now());
+            if (!detected || !detected.landmarks || !detected.landmarks.length) return null;
+            let minX = 1, minY = 1, maxX = 0, maxY = 0;
+            for (const hand of detected.landmarks) {
+                for (const lm of hand) {
+                    if (lm.x < minX) minX = lm.x;
+                    if (lm.y < minY) minY = lm.y;
+                    if (lm.x > maxX) maxX = lm.x;
+                    if (lm.y > maxY) maxY = lm.y;
+                }
+            }
+            const padX = 0.18;
+            const padY = 0.22;
+            return {
+                x0: Math.max(0, Math.floor((minX - padX) * width)),
+                y0: Math.max(0, Math.floor((minY - padY) * height)),
+                x1: Math.min(width - 1, Math.ceil((maxX + padX) * width)),
+                y1: Math.min(height - 1, Math.ceil((maxY + padY) * height)),
+            };
+        } catch (err) {
+            return null;
+        }
+    }
+
+    // Build foreground mask by scoring pixels against the estimated background.
+    // Center pixels are weighted higher so distant background is less likely to survive.
+    function buildMask(imgData, thresh, focusRegion = null) {
         const { data, width, height } = imgData;
         const [br, bg, bb] = sampleBackground(imgData);
-        const mask = new Uint8Array(width * height);
-        const t2 = thresh * thresh;
+        const scores = new Float32Array(width * height);
+        const left = Math.floor(width * 0.12);
+        const right = Math.floor(width * 0.88);
+        const top = Math.floor(height * 0.10);
+        const bottom = Math.floor(height * 0.92);
+        const roi = focusRegion || {
+            x0: Math.floor(width * 0.18),
+            y0: Math.floor(height * 0.18),
+            x1: Math.floor(width * 0.82),
+            y1: Math.floor(height * 0.84),
+        };
+        const cx = width * 0.5;
+        const cy = height * 0.52;
+        const maxR = Math.hypot(width * 0.5, height * 0.5);
+        let sum = 0;
+        let sum2 = 0;
+        let count = 0;
+
         for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+            const y = (p / width) | 0;
+            const x = p - y * width;
+            if (x < left || x > right || y < top || y > bottom) continue;
+            if (x < roi.x0 || x > roi.x1 || y < roi.y0 || y > roi.y1) continue;
             const dr = data[i] - br, dg = data[i+1] - bg, db = data[i+2] - bb;
-            if (dr*dr + dg*dg + db*db > t2) mask[p] = 1;
+            const colorDist = Math.hypot(dr, dg, db);
+            const dx = x - cx;
+            const dy = y - cy;
+            const radial = Math.min(1, Math.hypot(dx, dy) / maxR);
+            const centerWeight = 1 - Math.pow(radial, 1.9);
+            const score = colorDist * (0.55 + centerWeight * 0.85);
+            scores[p] = score;
+            sum += score;
+            sum2 += score * score;
+            count++;
+        }
+
+        const mean = count ? (sum / count) : 0;
+        const variance = count ? Math.max(0, sum2 / count - mean * mean) : 0;
+        const std = Math.sqrt(variance);
+        const baseThreshold = mean + std * 0.55;
+        const manualBias = Math.max(0.8, Math.min(1.7, thresh / 45));
+        const adaptiveThreshold = baseThreshold * manualBias;
+
+        const mask = new Uint8Array(width * height);
+        for (let p = 0; p < scores.length; p++) {
+            if (scores[p] > adaptiveThreshold) mask[p] = 1;
         }
         return mask;
+    }
+
+    function smoothMask(mask, width, height) {
+        const out = new Uint8Array(width * height);
+        for (let y = 1; y < height - 1; y++) {
+            for (let x = 1; x < width - 1; x++) {
+                let count = 0;
+                for (let oy = -1; oy <= 1; oy++) {
+                    for (let ox = -1; ox <= 1; ox++) {
+                        count += mask[(y + oy) * width + (x + ox)];
+                    }
+                }
+                out[y * width + x] = count >= 5 ? 1 : 0;
+            }
+        }
+        return out;
+    }
+
+    function erodeMask(mask, width, height) {
+        const out = new Uint8Array(width * height);
+        for (let y = 1; y < height - 1; y++) {
+            for (let x = 1; x < width - 1; x++) {
+                let keep = 1;
+                for (let oy = -1; oy <= 1 && keep; oy++) {
+                    for (let ox = -1; ox <= 1; ox++) {
+                        if (!mask[(y + oy) * width + (x + ox)]) { keep = 0; break; }
+                    }
+                }
+                out[y * width + x] = keep;
+            }
+        }
+        return out;
     }
 
     // Keep only the largest connected component (rejects tiny background-noise blobs).
@@ -1622,9 +3113,46 @@ document.querySelectorAll('.ws-btn').forEach(b => {
         return g;
     }
 
+    function drawScanFrameOverlay(ctx, width, height, focusRegion) {
+        const frame = focusRegion || {
+            x0: Math.floor(width * 0.18),
+            y0: Math.floor(height * 0.18),
+            x1: Math.floor(width * 0.82),
+            y1: Math.floor(height * 0.84),
+        };
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = 'rgba(15, 18, 20, 0.18)';
+        ctx.fillRect(0, 0, width, height);
+        ctx.clearRect(frame.x0, frame.y0, frame.x1 - frame.x0, frame.y1 - frame.y0);
+        ctx.strokeStyle = 'rgba(255, 130, 200, 0.95)';
+        ctx.lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.006));
+        ctx.strokeRect(frame.x0, frame.y0, frame.x1 - frame.x0, frame.y1 - frame.y0);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.lineWidth = Math.max(1, Math.round(Math.min(width, height) * 0.0035));
+        const corner = Math.max(16, Math.round(Math.min(width, height) * 0.04));
+        const corners = [
+            [frame.x0, frame.y0, 1, 1],
+            [frame.x1, frame.y0, -1, 1],
+            [frame.x0, frame.y1, 1, -1],
+            [frame.x1, frame.y1, -1, -1],
+        ];
+        for (const [x, y, sx, sy] of corners) {
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + sx * corner, y);
+            ctx.moveTo(x, y);
+            ctx.lineTo(x, y + sy * corner);
+            ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+        ctx.font = `${Math.max(12, Math.round(Math.min(width, height) * 0.03))}px sans-serif`;
+        ctx.fillText('Keep object and hands inside the frame', frame.x0 + 12, Math.max(18, frame.y0 - 10));
+    }
+
     function startPreviewLoop() {
         const w = scanPreview.width, h = scanPreview.height;
         const ctx = scanPreview.getContext('2d', { willReadFrequently: true });
+        const frameCtx = scanFrame.getContext('2d');
         const tick = () => {
             if (!scanStream) return;
             // Mirror the video onto our canvas to match what user sees.
@@ -1634,17 +3162,25 @@ document.querySelectorAll('.ws-btn').forEach(b => {
             ctx.drawImage(scanVideo, 0, 0, w, h);
             ctx.restore();
             const img = ctx.getImageData(0, 0, w, h);
-            const mask = buildMask(img, threshold);
+            const focusRegion = getScanFocusRegion(scanVideo, w, h);
+            let mask = buildMask(img, threshold, focusRegion);
+            mask = erodeMask(mask, w, h);
+            mask = smoothMask(mask, w, h);
             // Tint the FG pink in the preview overlay.
             const out = ctx.createImageData(w, h);
+            for (let i = 0; i < out.data.length; i += 4) {
+                out.data[i] = 255;
+                out.data[i+1] = 255;
+                out.data[i+2] = 255;
+                out.data[i+3] = 255;
+            }
             for (let i = 0, p = 0; i < out.data.length; i += 4, p++) {
                 if (mask[p]) {
-                    out.data[i] = 255; out.data[i+1] = 130; out.data[i+2] = 200; out.data[i+3] = 200;
-                } else {
-                    out.data[i+3] = 0;
+                    out.data[i] = 255; out.data[i+1] = 130; out.data[i+2] = 200; out.data[i+3] = 235;
                 }
             }
             ctx.putImageData(out, 0, 0);
+            drawScanFrameOverlay(frameCtx, w, h, focusRegion);
             previewRAF = requestAnimationFrame(tick);
         };
         previewRAF = requestAnimationFrame(tick);
@@ -1661,7 +3197,10 @@ document.querySelectorAll('.ws-btn').forEach(b => {
         tctx.restore();
         const img = tctx.getImageData(0, 0, w, h);
         scanStatus.textContent = 'Building mask…';
-        let mask = buildMask(img, threshold);
+        const focusRegion = getScanFocusRegion(scanVideo, w, h);
+        let mask = buildMask(img, threshold, focusRegion);
+        mask = erodeMask(mask, w, h);
+        mask = smoothMask(mask, w, h);
         mask = keepLargestComponent(mask, w, h);
         const fgCount = mask.reduce((a, v) => a + v, 0);
         if (fgCount < w * h * 0.01) {
@@ -1682,6 +3221,8 @@ document.querySelectorAll('.ws-btn').forEach(b => {
         mesh.rotation.set(0, 0, 0);
         mesh.scale.set(1, 1, 1);
         refreshWireframe();
+        rebuildTopologyCache();
+        SelectionController.clear();
         scene.add(mesh);
 
         scanStatus.textContent = `Done — ${(geo.attributes.position.count / 3) | 0} triangles. You can now sculpt, color, and export!`;
