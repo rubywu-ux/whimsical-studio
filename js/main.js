@@ -2,307 +2,835 @@ import * as THREE from 'three';
 import { HandLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
 
 // ============================================================
-// 1. SCENE
+// 1. SCENE SETUP
 // ============================================================
 const container = document.getElementById('canvas-container');
 const scene = new THREE.Scene();
-scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+scene.add(new THREE.AmbientLight(0xfaf0e6, 0.6)); // warm ambient
+const dirLight = new THREE.DirectionalLight(0xfffaf0, 1.2);
 dirLight.position.set(5, 10, 7);
 scene.add(dirLight);
-const backLight = new THREE.DirectionalLight(0xffffff, 0.3);
+const backLight = new THREE.DirectionalLight(0xe8ddd0, 0.4);
 backLight.position.set(-5, -3, -5);
 scene.add(backLight);
+// Soft fill from below for clay look
+const fillLight = new THREE.DirectionalLight(0xd4c4b0, 0.25);
+fillLight.position.set(0, -5, 3);
+scene.add(fillLight);
 
 const grid = new THREE.GridHelper(20, 20, 0x7b8b6f, 0x7b8b6f);
-grid.position.y = -1.5; grid.material.opacity = 0.4; grid.material.transparent = true;
+grid.position.y = -1.5;
+grid.material.opacity = 0.4;
+grid.material.transparent = true;
 scene.add(grid);
 
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
 camera.position.set(0, 0, 6);
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+camera.lookAt(0, 0, 0);
+let orbitTarget = new THREE.Vector3(0, 0, 0); // camera looks at this point
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 container.appendChild(renderer.domElement);
 const raycaster = new THREE.Raycaster();
+
+// --- Pinch touch point visuals ---
+const touchPointMat = new THREE.MeshBasicMaterial({
+    color: 0xffdd57, transparent: true, opacity: 0.9, depthTest: false, toneMapped: false,
+});
+const touchPointRingMat = new THREE.MeshBasicMaterial({
+    color: 0xffdd57, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthTest: false, toneMapped: false,
+});
+const touchPointDot = new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 8), touchPointMat);
+touchPointDot.renderOrder = 1000;
+touchPointDot.visible = false;
+scene.add(touchPointDot);
+
+const touchPointRing = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.09, 32), touchPointRingMat);
+touchPointRing.renderOrder = 999;
+touchPointRing.visible = false;
+scene.add(touchPointRing);
+
+// Pulsing outer ring
+const touchPointPulse = new THREE.Mesh(
+    new THREE.RingGeometry(0.09, 0.11, 32),
+    new THREE.MeshBasicMaterial({ color: 0xffdd57, transparent: true, opacity: 0.2, side: THREE.DoubleSide, depthTest: false, toneMapped: false })
+);
+touchPointPulse.renderOrder = 998;
+touchPointPulse.visible = false;
+scene.add(touchPointPulse);
+
+let touchPointTime = 0;
+const _touchNdc = new THREE.Vector2();
+const _touchPt = new THREE.Vector3();
+const _touchNm = new THREE.Vector3();
+const _touchDir = new THREE.Vector3();
+
+function showTouchPoint(screenX, screenY) {
+    // Raycast from pinch screen position to find 3D point
+    _touchNdc.set(
+        (screenX / innerWidth) * 2 - 1,
+        -(screenY / innerHeight) * 2 + 1
+    );
+    raycaster.setFromCamera(_touchNdc, camera);
+    const hits = raycaster.intersectObject(mesh);
+    if (hits.length) {
+        _touchPt.copy(hits[0].point);
+        _touchNm.set(0, 0, 1);
+        if (hits[0].face?.normal) _touchNm.copy(hits[0].face.normal).transformDirection(mesh.matrixWorld).normalize();
+        touchPointDot.position.copy(_touchPt).addScaledVector(_touchNm, 0.02);
+        touchPointRing.position.copy(touchPointDot.position);
+        touchPointPulse.position.copy(touchPointDot.position);
+        touchPointRing.lookAt(_touchPt.copy(touchPointDot.position).add(_touchNm));
+        touchPointPulse.lookAt(_touchPt.copy(touchPointDot.position).add(_touchNm));
+        touchPointDot.visible = true;
+        touchPointRing.visible = true;
+        touchPointPulse.visible = true;
+        // Pulse animation
+        touchPointTime += 0.15;
+        const pulse = 1 + Math.sin(touchPointTime * 3) * 0.25;
+        touchPointPulse.scale.setScalar(pulse);
+        touchPointPulse.material.opacity = 0.12 + Math.sin(touchPointTime * 3) * 0.08;
+    } else {
+        // No hit — show at a fixed depth in front of camera
+        raycaster.ray.direction.normalize();
+        _touchDir.copy(raycaster.ray.direction).multiplyScalar(4);
+        touchPointDot.position.copy(raycaster.ray.origin).add(_touchDir);
+        touchPointRing.position.copy(touchPointDot.position);
+        touchPointPulse.position.copy(touchPointDot.position);
+        touchPointRing.lookAt(camera.position);
+        touchPointPulse.lookAt(camera.position);
+        touchPointDot.visible = true;
+        touchPointRing.visible = true;
+        touchPointPulse.visible = true;
+    }
+}
+
+function hideTouchPoint() {
+    touchPointDot.visible = false;
+    touchPointRing.visible = false;
+    touchPointPulse.visible = false;
+}
+
+window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+});
 
 // ============================================================
 // 2. SHAPES & MESH
 // ============================================================
 const SHAPE_LABELS = {
-    sphere: 'Sphere',
-    cube: 'Cube',
-    roundedcube: 'Rounded Cube',
-    cylinder: 'Cylinder',
-    beveledcylinder: 'Beveled Cylinder',
-    cone: 'Cone',
-    torus: 'Torus',
-    helix: 'Helix',
-    pyramid: 'Pyramid',
-    icosahedron: 'Icosahedron',
-    dodecahedron: 'Dodecahedron',
-    torusknot: 'Torus Knot',
+    sphere: 'Sphere', cube: 'Cube', cylinder: 'Cylinder', cone: 'Cone',
+    torus: 'Torus', pyramid: 'Pyramid', icosahedron: 'Icosahedron',
+    dodecahedron: 'Dodecahedron', torusknot: 'Torus Knot', helix: 'Helix',
+    apple: 'Apple', heart: 'Heart', star: 'Star', mushroom: 'Mushroom',
+    banana: 'Banana', berry: 'Berry', clover: 'Clover', pear: 'Pear', strawberry: 'Strawberry',
 };
 
-function makeRoundedCubeGeometry(size = 1.5, radius = 0.22, segments = 10) {
-    const g = new THREE.BoxGeometry(size, size, size, segments, segments, segments);
-    const p = g.attributes.position;
-    const innerHalf = size * 0.5 - radius;
-    const v = new THREE.Vector3();
-    const inner = new THREE.Vector3();
-    const delta = new THREE.Vector3();
-    for (let i = 0; i < p.count; i++) {
-        v.fromBufferAttribute(p, i);
-        inner.set(
-            THREE.MathUtils.clamp(v.x, -innerHalf, innerHalf),
-            THREE.MathUtils.clamp(v.y, -innerHalf, innerHalf),
-            THREE.MathUtils.clamp(v.z, -innerHalf, innerHalf),
-        );
-        delta.copy(v).sub(inner);
-        if (delta.lengthSq() < 1e-6) {
-            const ax = Math.abs(v.x), ay = Math.abs(v.y), az = Math.abs(v.z);
-            if (ax >= ay && ax >= az) delta.set(Math.sign(v.x) || 1, 0, 0);
-            else if (ay >= ax && ay >= az) delta.set(0, Math.sign(v.y) || 1, 0);
-            else delta.set(0, 0, Math.sign(v.z) || 1);
-        }
-        delta.normalize().multiplyScalar(radius);
-        p.setXYZ(i, inner.x + delta.x, inner.y + delta.y, inner.z + delta.z);
+// Organic shape generator: deform a sphere with math
+function makeOrganicShape(deformFn, segs = 48, rings = 36) {
+    const geo = new THREE.SphereGeometry(1, segs, rings);
+    const pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+        const len = Math.sqrt(x*x + y*y + z*z) || 1;
+        const nx = x/len, ny = y/len, nz = z/len;
+        const theta = Math.atan2(nz, nx); // longitude
+        const phi = Math.acos(Math.max(-1, Math.min(1, ny))); // latitude from top
+        const r = deformFn(nx, ny, nz, theta, phi, len);
+        pos.setXYZ(i, nx*r, ny*r, nz*r);
     }
-    p.needsUpdate = true;
-    g.computeVertexNormals();
-    return g;
-}
-
-function makeBeveledCylinderGeometry(radius = 0.82, height = 2, bevel = 0.18, radialSeg = 32, heightSeg = 14) {
-    const g = new THREE.CylinderGeometry(radius, radius, height, radialSeg, heightSeg, false);
-    const p = g.attributes.position;
-    const halfH = height * 0.5;
-    const innerRad = Math.max(0.05, radius - bevel);
-    const innerHalfH = Math.max(0.05, halfH - bevel);
-    const v = new THREE.Vector3();
-    const inner = new THREE.Vector3();
-    const delta = new THREE.Vector3();
-    const radial = new THREE.Vector3();
-    for (let i = 0; i < p.count; i++) {
-        v.fromBufferAttribute(p, i);
-        radial.set(v.x, 0, v.z);
-        const radialLen = radial.length();
-        if (radialLen > 1e-6) radial.multiplyScalar(1 / radialLen);
-        else radial.set(1, 0, 0);
-        inner.copy(v);
-        inner.y = THREE.MathUtils.clamp(v.y, -innerHalfH, innerHalfH);
-        if (radialLen > innerRad) {
-            inner.x = radial.x * innerRad;
-            inner.z = radial.z * innerRad;
-        }
-        delta.copy(v).sub(inner);
-        if (delta.lengthSq() < 1e-6) delta.copy(radial);
-        delta.normalize().multiplyScalar(bevel);
-        p.setXYZ(i, inner.x + delta.x, inner.y + delta.y, inner.z + delta.z);
-    }
-    p.needsUpdate = true;
-    g.computeVertexNormals();
-    return g;
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+    return geo;
 }
 
 const SHAPES = {
-    sphere:   () => new THREE.SphereGeometry(1, 32, 24),
-    cube:     () => new THREE.BoxGeometry(1.5, 1.5, 1.5, 10, 10, 10),
-    roundedcube: () => makeRoundedCubeGeometry(),
-    cylinder: () => new THREE.CylinderGeometry(0.8, 0.8, 2, 32, 10),
-    beveledcylinder: () => makeBeveledCylinderGeometry(),
-    cone:     () => new THREE.ConeGeometry(1, 2, 32, 10),
-    torus:    () => new THREE.TorusGeometry(0.8, 0.35, 20, 40),
-    helix:    () => new THREE.TorusKnotGeometry(0.7, 0.16, 180, 28, 2, 7),
-    pyramid:  () => new THREE.ConeGeometry(1, 1.8, 4, 1),
-    icosahedron: () => new THREE.IcosahedronGeometry(1.05, 0),
+    sphere:       () => new THREE.SphereGeometry(1, 32, 24),
+    cube:         () => new THREE.BoxGeometry(1.5, 1.5, 1.5, 10, 10, 10),
+    cylinder:     () => new THREE.CylinderGeometry(0.8, 0.8, 2, 32, 10),
+    cone:         () => new THREE.ConeGeometry(1, 2, 32, 10),
+    torus:        () => new THREE.TorusGeometry(0.8, 0.35, 20, 40),
+    pyramid:      () => new THREE.ConeGeometry(1, 1.8, 4, 1),
+    icosahedron:  () => new THREE.IcosahedronGeometry(1.05, 0),
     dodecahedron: () => new THREE.DodecahedronGeometry(1.0, 0),
-    torusknot: () => new THREE.TorusKnotGeometry(0.76, 0.2, 150, 20, 3, 5),
+    torusknot:    () => new THREE.TorusKnotGeometry(0.76, 0.2, 150, 20, 3, 5),
+    helix:        () => new THREE.TorusKnotGeometry(0.7, 0.16, 180, 28, 2, 7),
+
+    // Organic templates — direct vertex manipulation for accurate shapes
+    apple: () => {
+        const geo = new THREE.SphereGeometry(1, 48, 36);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const r = Math.sqrt(x*x + z*z);
+            const theta = Math.atan2(z, x);
+            // Body: wider at middle, narrower at top/bottom
+            const bodyScale = 1.0 + 0.15 * Math.cos(y * Math.PI * 0.5);
+            x *= bodyScale; z *= bodyScale;
+            // Top indent (stem dimple)
+            if (y > 0.7) {
+                const t = (y - 0.7) / 0.3;
+                const indent = t * t * 0.35;
+                const squeeze = 1.0 - t * 0.5;
+                x *= squeeze; z *= squeeze;
+                y -= indent;
+            }
+            // Bottom taper — gentle roundness
+            if (y < -0.6) {
+                const t = (-0.6 - y) / 0.4;
+                x *= 1.0 - t * 0.4;
+                z *= 1.0 - t * 0.4;
+            }
+            // Subtle five-fold symmetry (apple lobes)
+            const lobe = 1.0 + 0.04 * Math.cos(theta * 5);
+            x *= lobe; z *= lobe;
+            pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
+    heart: () => {
+        // Parametric heart using vertex manipulation
+        const geo = new THREE.SphereGeometry(1, 48, 36);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const len = Math.sqrt(x*x + y*y + z*z) || 1;
+            const nx = x/len, ny = y/len, nz = z/len;
+            const theta = Math.atan2(nz, nx);
+            // Heart cross-section: r = 1 - sin(theta) style
+            if (ny > -0.1) {
+                // Upper part: two lobes
+                const lobeR = 0.9 + 0.4 * Math.pow(Math.abs(Math.sin(theta)), 0.7);
+                const vertScale = 1.0 - 0.2 * ny * ny;
+                x = nx * lobeR * vertScale;
+                z = nz * lobeR * vertScale;
+                // Push lobes up and apart
+                y = ny * 0.7 + 0.2;
+                // Crease between lobes at front/back
+                const crease = Math.pow(Math.max(0, Math.cos(theta)), 8) * 0.2;
+                y -= crease * Math.max(0, ny);
+            } else {
+                // Lower part: taper to point
+                const t = Math.min(1, (-0.1 - ny) / 0.9);
+                const taper = 1.0 - t;
+                x = nx * 0.8 * taper * taper;
+                z = nz * 0.8 * taper * taper;
+                y = -0.1 - t * 1.2;
+            }
+            pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
+    star: () => {
+        // Flat 5-pointed star extruded to have thickness
+        const geo = new THREE.CylinderGeometry(1, 1, 0.3, 60, 2, false);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const theta = Math.atan2(z, x);
+            const r = Math.sqrt(x*x + z*z);
+            // Star shape: alternating spikes and valleys
+            const angle5 = ((theta % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+            const segment = angle5 / (Math.PI * 2) * 5;
+            const frac = segment % 1;
+            // Triangle wave between inner radius (0.4) and outer (1.0)
+            const starR = frac < 0.5
+                ? 0.4 + (1.0 - 0.4) * (frac / 0.5)
+                : 0.4 + (1.0 - 0.4) * ((1.0 - frac) / 0.5);
+            const scale = r > 0.01 ? starR / r : 1;
+            x *= scale; z *= scale;
+            // Round the edges slightly
+            const edgeRound = 1.0 - 0.15 * Math.abs(y) / 0.15;
+            x *= Math.max(0.9, edgeRound); z *= Math.max(0.9, edgeRound);
+            pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
+    mushroom: () => {
+        // Cap on top + cylindrical stem below
+        const geo = new THREE.SphereGeometry(1, 48, 40);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const len = Math.sqrt(x*x + y*y + z*z) || 1;
+            const nx = x/len, nz = z/len;
+            const horizR = Math.sqrt(nx*nx + nz*nz);
+            if (y > -0.15) {
+                // Cap: dome shape, wide and flattened
+                const capY = Math.max(0, y);
+                const capR = 1.15 * Math.sqrt(Math.max(0, 1.0 - capY * capY * 0.8));
+                x = nx * capR * 1.1;
+                z = nz * capR * 1.1;
+                y = capY * 0.45 + 0.15; // flatten
+                // Underside curl
+                if (y < 0.2 && horizR > 0.6) {
+                    y -= (horizR - 0.6) * 0.3;
+                }
+            } else {
+                // Stem: narrow tapered cylinder
+                const stemT = Math.min(1, (-0.15 - y) / 0.85);
+                const stemR = 0.22 + 0.06 * Math.sin(stemT * 3) - stemT * 0.04;
+                x = nx * stemR / Math.max(0.01, horizR);
+                z = nz * stemR / Math.max(0.01, horizR);
+                y = -0.15 - stemT * 1.1;
+                // Slight bulge at base
+                if (stemT > 0.8) { const b = (stemT - 0.8) / 0.2; x *= 1.0 + b * 0.3; z *= 1.0 + b * 0.3; }
+            }
+            pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
+    banana: () => {
+        // Elongated curved cylinder tapered at ends
+        const geo = new THREE.SphereGeometry(1, 32, 56);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const len = Math.sqrt(x*x + y*y + z*z) || 1;
+            // Normalize
+            const ny = y / len;
+            // Map Y from -1..1 to banana length
+            const t = (ny + 1) / 2; // 0 = bottom, 1 = top
+            // Cross-section radius: tapers at both ends
+            const crossR = 0.28 * Math.sin(t * Math.PI) * (1.0 - 0.3 * Math.pow(Math.abs(t - 0.5) * 2, 3));
+            // Banana curve: arc in XY plane
+            const curveAngle = (t - 0.5) * Math.PI * 0.7;
+            const cx = Math.sin(curveAngle) * 0.8;
+            const cy = Math.cos(curveAngle) * 1.4 - 0.7;
+            // Angular position around cross-section
+            const nx2 = x / len, nz2 = z / len;
+            const angR = Math.sqrt(nx2*nx2 + nz2*nz2) || 0.01;
+            x = cx + (nx2 / angR) * crossR;
+            z = (nz2 / angR) * crossR;
+            y = cy;
+            // Slight pentagon cross-section (banana ridges)
+            const cTheta = Math.atan2(nz2, nx2);
+            const ridge = 1.0 + 0.08 * Math.cos(cTheta * 5);
+            x = cx + (nx2 / angR) * crossR * ridge;
+            z = (nz2 / angR) * crossR * ridge;
+            pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
+    berry: () => {
+        const geo = new THREE.SphereGeometry(0.85, 48, 36);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const len = Math.sqrt(x*x + y*y + z*z) || 1;
+            const theta = Math.atan2(z, x);
+            const phi = Math.acos(Math.max(-1, Math.min(1, y / len)));
+            // Individual drupelets (bumpy spheres packed together)
+            const bump = 0.07 * Math.sin(theta * 7 + 0.5) * Math.sin(phi * 6)
+                       + 0.04 * Math.cos(theta * 11 + 1.2) * Math.cos(phi * 9);
+            const r = len + bump;
+            // Slightly flatten top for calyx
+            const topFlatten = y > 0.6 ? 1.0 - (y - 0.6) * 0.3 : 1.0;
+            pos.setXYZ(i, x / len * r, y / len * r * topFlatten, z / len * r);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
+    clover: () => {
+        // Three heart-shaped leaves on a stem
+        const geo = new THREE.SphereGeometry(1, 64, 36);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const len = Math.sqrt(x*x + y*y + z*z) || 1;
+            const nx = x/len, ny = y/len, nz = z/len;
+            const theta = Math.atan2(nz, nx);
+            if (ny > -0.3) {
+                // Leaves: 3 lobes using cardioid-like function
+                const lobeAngle = theta * 1.5; // 3 lobes
+                const lobeR = 0.5 + 0.5 * Math.pow(Math.abs(Math.sin(lobeAngle)), 0.6);
+                // Flatten leaves vertically
+                const flatY = ny * 0.25 + 0.15;
+                const leafScale = 1.0 - Math.pow(Math.max(0, ny), 2) * 0.5;
+                x = nx * lobeR * leafScale;
+                z = nz * lobeR * leafScale;
+                y = flatY;
+            } else {
+                // Stem
+                const stemT = (-0.3 - ny) / 0.7;
+                x = nx * 0.08;
+                z = nz * 0.08;
+                y = -0.3 - stemT * 1.0;
+            }
+            pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
+    pear: () => {
+        const geo = new THREE.SphereGeometry(1, 48, 36);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const len = Math.sqrt(x*x + y*y + z*z) || 1;
+            const ny = y / len;
+            // Pear profile: narrow neck at top, wide bottom
+            let bodyR;
+            if (ny > 0.3) {
+                // Neck narrows toward top
+                const t = (ny - 0.3) / 0.7;
+                bodyR = 0.55 - t * 0.25;
+            } else {
+                // Wide bottom belly
+                const t = (0.3 - ny) / 1.3;
+                bodyR = 0.55 + 0.45 * Math.sin(t * Math.PI);
+            }
+            // Top dimple
+            if (ny > 0.85) {
+                bodyR *= 1.0 - (ny - 0.85) * 2;
+            }
+            x = x / len * bodyR;
+            z = z / len * bodyR;
+            // Stretch vertically for pear proportions
+            y *= 1.2;
+            pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
+    strawberry: () => {
+        const geo = new THREE.SphereGeometry(1, 48, 36);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const len = Math.sqrt(x*x + y*y + z*z) || 1;
+            const ny = y / len;
+            const theta = Math.atan2(z, x);
+            const phi = Math.acos(Math.max(-1, Math.min(1, ny)));
+            // Strawberry: wide shoulders, tapers to point at bottom
+            let bodyR;
+            if (ny > 0.2) {
+                // Wide top with slight shoulder roundness
+                bodyR = 0.85 + 0.1 * Math.cos((ny - 0.2) * 2);
+            } else {
+                // Taper to point
+                const t = (0.2 - ny) / 1.2;
+                bodyR = 0.85 * (1.0 - t * t);
+                bodyR = Math.max(0.04, bodyR);
+            }
+            // Seed dimples
+            const seeds = 0.03 * Math.sin(theta * 8 + phi * 0.5) * Math.sin(phi * 7);
+            bodyR += seeds;
+            x = x / len * bodyR;
+            z = z / len * bodyR;
+            // Elongate slightly
+            y *= 1.15;
+            pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true; geo.computeVertexNormals(); return geo;
+    },
 };
 
 let currentShape = 'sphere';
-let mesh = null, wireframe = null;
-let shapeLabel = null;
-let shapeItems = [];
-const material = new THREE.MeshStandardMaterial({ color: 0xa8c3e6, roughness: 0.35, metalness: 0.1, flatShading: false, side: THREE.DoubleSide });
-const selectionState = {
-    kind: 'none',
-    active: false,
-    pointLocal: new THREE.Vector3(),
-    normalLocal: new THREE.Vector3(0, 0, 1),
-    radius: 0.55,
-    logicalVertexIds: new Set(),
-    boundaryVertexIds: new Set(),
-    pulseUntil: 0,
-};
-const interactionState = {
-    mode: 'select',
-    selection: selectionState,
-    activeOperation: null,
-    placementSpec: { shape: 'sphere', scale: 0.3, depth: 0.5, blendStrength: 0.7, variant: 'default' },
-    lastAddSpec: null,
-};
-const topologyCache = {
-    logicalVertices: [],
-    bufferToLogical: [],
-    adjacency: [],
-    version: 0,
-};
-const GESTURE_TUNING = {
-    modeLockMs: 120000,
-    dragPixelDeadZone: 12,
-    dragStep: 0.018,
-    dragScale: 0.0024,
-    axisBiasRatio: 1.35,
-    sculptDepthDeadZone: 0.007,
-    sculptDepthStep: 0.012,
-    sculptDepthScale: 0.75,
-    formDepthDeadZone: 0.010,
-    formDepthStep: 0.020,
-    formDepthScale: 1.0,
-    bevelDepthDeadZone: 0.008,
-    bevelDepthStep: 0.014,
-    bevelDepthScale: 0.75,
-    formNormalSnap: 1.0,
-    detailNormalSnap: 1.0,
-    sculptNormalSnap: 0.72,
-};
-let modeLockUntil = 0;
+let mesh = null;
+let wireframe = null;
+const material = new THREE.MeshStandardMaterial({
+    color: 0xd4b896, roughness: 0.85, metalness: 0.0,
+    flatShading: false, side: THREE.DoubleSide,
+});
 
-// ---- Crochet shader patch ---------------------------------------------------
-// Procedural V-stitch pattern in OBJECT space (so the texture is locked to the
-// mesh and rotates with it like a real fabric — no sliding when you orbit).
-// Triplanar projection blends three planar samples by the object-space normal,
-// so it works on any geometry without needing UVs (important: addShapeToMesh
-// merges geometry without preserving UVs).
-material.userData.uCrochet      = { value: 0.0 };
-material.userData.uCrochetScale = { value: 22.0 };  // higher = smaller stitches
-material.userData.uCrochetDark  = { value: 0.18 };  // gap darkness (lower = brighter object)
-material.userData.uCrochetBump  = { value: 0.22 };  // 3D pop of the stitches
-material.onBeforeCompile = (shader) => {
-    shader.uniforms.uCrochet      = material.userData.uCrochet;
-    shader.uniforms.uCrochetScale = material.userData.uCrochetScale;
-    shader.uniforms.uCrochetDark  = material.userData.uCrochetDark;
-    shader.uniforms.uCrochetBump  = material.userData.uCrochetBump;
+// Track last added shape for array duplication
+let lastAddedRange = null; // { start: vertexIndex, count: numVertices }
 
-    shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', `
-            #include <common>
-            varying vec3 vCroObjPos;
-            varying vec3 vCroObjNrm;
-        `)
-        .replace('#include <project_vertex>', `
-            #include <project_vertex>
-            // OBJECT space — locks the pattern to the mesh.
-            vCroObjPos = transformed;
-            vCroObjNrm = normalize(objectNormal);
-        `);
+// ============================================================
+// MULTI-MESH: separate objects that can be individually selected/moved
+// ============================================================
+const sceneObjects = []; // array of { mesh, name, wireframe }
+let selectedObject = null;
+let selectedOutline = null;
+const outlineMat = new THREE.MeshBasicMaterial({
+    color: 0xffdd57, transparent: true, opacity: 0.3,
+    side: THREE.BackSide, depthWrite: false,
+});
 
-    shader.fragmentShader = `
-        uniform float uCrochet;
-        uniform float uCrochetScale;
-        uniform float uCrochetDark;
-        uniform float uCrochetBump;
-        varying vec3 vCroObjPos;
-        varying vec3 vCroObjNrm;
+// Hover highlight (shown before selection)
+let hoveredObject = null;
+let hoverOutline = null;
+const hoverOutlineMat = new THREE.MeshBasicMaterial({
+    color: 0x88ccff, transparent: true, opacity: 0.2,
+    side: THREE.BackSide, depthWrite: false,
+});
 
-        float croHash(vec2 p) {
-            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+function setHoveredObject(entry) {
+    if (hoveredObject === entry) {
+        // Just update transform
+        if (hoverOutline && entry) {
+            entry.mesh.updateMatrixWorld(true);
+            hoverOutline.matrix.copy(entry.mesh.matrixWorld).scale(new THREE.Vector3(1.06, 1.06, 1.06));
         }
+        return;
+    }
+    clearHoveredObject();
+    if (!entry || entry === selectedObject) return;
+    hoveredObject = entry;
+    const geo = entry.mesh.geometry.clone();
+    hoverOutline = new THREE.Mesh(geo, hoverOutlineMat);
+    entry.mesh.updateMatrixWorld(true);
+    hoverOutline.matrixAutoUpdate = false;
+    hoverOutline.matrix.copy(entry.mesh.matrixWorld).scale(new THREE.Vector3(1.06, 1.06, 1.06));
+    hoverOutline.renderOrder = 900;
+    scene.add(hoverOutline);
+}
 
-        // Single V-stitch SDF inside one cell (uv in [0,1]^2).
-        // Returns: x = stitch coverage [0..1] (1 = on yarn, 0 = gap)
-        //          y = signed distance to nearest yarn centre line (for AA + bump)
-        vec2 croStitchCell(vec2 uv) {
-            // Brick-stagger every other row (real crochet single-crochet pattern).
-            float row = floor(uv.y);
-            float xoff = mod(row, 2.0) * 0.5;
-            vec2 cellId = vec2(floor(uv.x + xoff), row);
-            vec2 cell   = vec2(fract(uv.x + xoff), fract(uv.y));
+function clearHoveredObject() {
+    if (hoverOutline) {
+        scene.remove(hoverOutline);
+        hoverOutline.geometry.dispose();
+        hoverOutline = null;
+    }
+    hoveredObject = null;
+}
 
-            // Two arms of a V meeting at bottom-centre. Mirror around x=0.5
-            // so we only solve for one arm.
-            vec2 p = vec2(abs(cell.x - 0.5), cell.y);
-            // Arm endpoints (in mirrored half-cell): (0, 0.05) -> (0.42, 0.95)
-            vec2 a = vec2(0.00, 0.05);
-            vec2 b = vec2(0.42, 0.95);
-            vec2 ab = b - a;
-            float t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
-            float d = length(p - a - ab * t);
+function addSceneObject(shapeName, worldPos, scale, rotation) {
+    const geo = SHAPES[shapeName]().toNonIndexed();
+    geo.computeVertexNormals();
+    const mat = material.clone();
+    const obj = new THREE.Mesh(geo, mat);
+    // Place directly in world space
+    obj.position.copy(worldPos);
+    if (scale) obj.scale.setScalar(scale);
+    if (rotation) obj.rotation.copy(rotation);
+    scene.add(obj); // add directly to scene — always visible
+    const wire = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo, 15),
+        new THREE.LineBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.12 })
+    );
+    obj.add(wire);
+    const entry = { mesh: obj, name: shapeName, wireframe: wire };
+    sceneObjects.push(entry);
+    return entry;
+}
 
-            // Anti-aliased yarn thickness using screen-space derivative.
-            float aa = max(fwidth(d), 0.001);
-            float thickness = 0.13;
-            float coverage = 1.0 - smoothstep(thickness - aa, thickness + aa, d);
+function removeSceneObject(entry) {
+    if (!entry) return;
+    scene.remove(entry.mesh); // remove from scene
+    entry.mesh.geometry.dispose();
+    entry.mesh.material.dispose();
+    if (entry.wireframe) entry.wireframe.geometry.dispose();
+    const idx = sceneObjects.indexOf(entry);
+    if (idx !== -1) sceneObjects.splice(idx, 1);
+    if (selectedObject === entry) deselectObject();
+}
 
-            return vec2(coverage, d);
-        }
+let selectedBoxHelper = null; // bounding box wireframe
+let selectedAxesHelper = null; // RGB axis arrows
+let selectedAnchors = []; // scale anchor handles
+let draggingAnchor = null; // which anchor is being dragged
+let anchorDragAxis = null; // 'x', 'y', or 'z'
+let anchorDragSign = 0; // +1 or -1
 
-        // Triplanar blend by object-space normal.
-        vec4 croStitchTri(vec3 p, vec3 n) {
-            vec3 b = pow(abs(n), vec3(4.0));   // sharper blend = less ghosting on diagonals
-            b /= (b.x + b.y + b.z + 1e-5);
-            vec2 sx = croStitchCell(p.zy * uCrochetScale);
-            vec2 sy = croStitchCell(p.xz * uCrochetScale);
-            vec2 sz = croStitchCell(p.xy * uCrochetScale);
-            // x = coverage, y = distance (use min-distance across planes for sharper bump)
-            float cov = sx.x * b.x + sy.x * b.y + sz.x * b.z;
-            float dist = min(sx.y, min(sy.y, sz.y));
-            // Per-stitch colour jitter (slight yarn shade variation per cell)
-            vec2 cellId = floor(p.xy * uCrochetScale + vec2(0.5));
-            float jitter = croHash(cellId) * 0.12 - 0.06;
-            return vec4(cov, dist, jitter, 1.0);
-        }
-    ` + shader.fragmentShader
-        .replace('#include <color_fragment>', `
-            #include <color_fragment>
-            if (uCrochet > 0.5) {
-                vec4 cro = croStitchTri(vCroObjPos, normalize(vCroObjNrm));
-                // Darken gaps between stitches.
-                diffuseColor.rgb *= (1.0 - (1.0 - cro.x) * uCrochetDark);
-                // Per-stitch yarn shade jitter (mostly visible on yarn pixels).
-                diffuseColor.rgb *= (1.0 + cro.z * cro.x);
-            }
-        `)
-        .replace('#include <roughnessmap_fragment>', `
-            #include <roughnessmap_fragment>
-            if (uCrochet > 0.5) {
-                vec4 cro = croStitchTri(vCroObjPos, normalize(vCroObjNrm));
-                // Yarn ridges catch a bit more light; gaps stay fully fuzzy.
-                roughnessFactor = mix(1.0, 0.72, cro.x);
-            }
-        `)
-        .replace('#include <normal_fragment_maps>', `
-            #include <normal_fragment_maps>
-            if (uCrochet > 0.5) {
-                // Cheap derivative bump from the coverage field — yarn strands pop.
-                float h  = croStitchTri(vCroObjPos, normalize(vCroObjNrm)).x;
-                float hx = dFdx(h);
-                float hy = dFdy(h);
-                vec3 dpx = dFdx(vCroObjPos);
-                vec3 dpy = dFdy(vCroObjPos);
-                vec3 r1 = cross(dpy, normal);
-                vec3 r2 = cross(normal, dpx);
-                vec3 grad = (r1 * hx + r2 * hy) /
-                            max(abs(dot(dpx, r1)), 1e-4);
-                normal = normalize(normal - grad * uCrochetBump);
-            }
-        `);
+const ANCHOR_SIZE = 0.1;
+const ANCHOR_COLORS = {
+    x: 0xff4444, // red
+    y: 0x44ff44, // green
+    z: 0x4444ff, // blue
 };
+
+function createAnchorHandles(entry) {
+    removeAnchorHandles();
+    entry.mesh.geometry.computeBoundingBox();
+    const box = entry.mesh.geometry.boundingBox;
+    if (!box) return;
+    const s = entry.mesh.scale;
+
+    const axes = [
+        { axis: 'x', sign: +1, pos: new THREE.Vector3(box.max.x * s.x, 0, 0) },
+        { axis: 'x', sign: -1, pos: new THREE.Vector3(box.min.x * s.x, 0, 0) },
+        { axis: 'y', sign: +1, pos: new THREE.Vector3(0, box.max.y * s.y, 0) },
+        { axis: 'y', sign: -1, pos: new THREE.Vector3(0, box.min.y * s.y, 0) },
+        { axis: 'z', sign: +1, pos: new THREE.Vector3(0, 0, box.max.z * s.z) },
+        { axis: 'z', sign: -1, pos: new THREE.Vector3(0, 0, box.min.z * s.z) },
+    ];
+
+    const geo = new THREE.SphereGeometry(ANCHOR_SIZE, 8, 8);
+    for (const a of axes) {
+        const mat = new THREE.MeshBasicMaterial({
+            color: ANCHOR_COLORS[a.axis],
+            depthTest: false,
+            transparent: true,
+            opacity: 0.85,
+        });
+        const sphere = new THREE.Mesh(geo, mat);
+        sphere.position.copy(a.pos);
+        sphere.renderOrder = 1000;
+        sphere.userData = { axis: a.axis, sign: a.sign };
+        entry.mesh.add(sphere);
+        selectedAnchors.push(sphere);
+    }
+}
+
+function removeAnchorHandles() {
+    for (const anchor of selectedAnchors) {
+        if (anchor.parent) anchor.parent.remove(anchor);
+        anchor.material.dispose();
+    }
+    selectedAnchors = [];
+    draggingAnchor = null;
+    anchorDragAxis = null;
+}
+
+function updateAnchorPositions(entry) {
+    if (!selectedAnchors.length || !entry) return;
+    entry.mesh.geometry.computeBoundingBox();
+    const box = entry.mesh.geometry.boundingBox;
+    if (!box) return;
+    const s = entry.mesh.scale;
+    const positions = [
+        new THREE.Vector3(box.max.x * s.x, 0, 0),
+        new THREE.Vector3(box.min.x * s.x, 0, 0),
+        new THREE.Vector3(0, box.max.y * s.y, 0),
+        new THREE.Vector3(0, box.min.y * s.y, 0),
+        new THREE.Vector3(0, 0, box.max.z * s.z),
+        new THREE.Vector3(0, 0, box.min.z * s.z),
+    ];
+    for (let i = 0; i < selectedAnchors.length && i < positions.length; i++) {
+        selectedAnchors[i].position.copy(positions[i]);
+    }
+}
+
+function selectObject(entry) {
+    deselectObject();
+    selectedObject = entry;
+
+    // Yellow outline
+    const outlineGeo = entry.mesh.geometry.clone();
+    selectedOutline = new THREE.Mesh(outlineGeo, outlineMat);
+    entry.mesh.updateMatrixWorld(true);
+    selectedOutline.matrixAutoUpdate = false;
+    selectedOutline.matrix.copy(entry.mesh.matrixWorld).scale(new THREE.Vector3(1.05, 1.05, 1.05));
+    scene.add(selectedOutline);
+
+    // Bounding box wireframe (dark orange)
+    selectedBoxHelper = new THREE.BoxHelper(entry.mesh, 0xe07020);
+    scene.add(selectedBoxHelper);
+
+    // Axis helper (R=X, G=Y, B=Z) — extends well outside the object
+    entry.mesh.geometry.computeBoundingSphere();
+    const axisSize = (entry.mesh.geometry.boundingSphere?.radius || 1) * entry.mesh.scale.x * 2.5;
+    selectedAxesHelper = new THREE.AxesHelper(axisSize);
+    selectedAxesHelper.material.depthTest = false;
+    selectedAxesHelper.renderOrder = 999;
+    entry.mesh.add(selectedAxesHelper);
+
+    // Scale anchor handles
+    createAnchorHandles(entry);
+
+    setCommandStatus(`Selected: ${SHAPE_LABELS[entry.name] || entry.name} — drag to move, scroll to resize, Delete to remove`);
+}
+
+function deselectObject() {
+    // If we have a group selection, ungroup first
+    if (selectedObject && selectedObject._isGroup) {
+        ungroupAllObjects();
+    }
+    if (selectedOutline) {
+        scene.remove(selectedOutline);
+        selectedOutline.geometry.dispose();
+        selectedOutline = null;
+    }
+    if (selectedBoxHelper) {
+        scene.remove(selectedBoxHelper);
+        selectedBoxHelper.dispose();
+        selectedBoxHelper = null;
+    }
+    if (selectedAxesHelper && selectedObject) {
+        selectedObject.mesh.remove(selectedAxesHelper);
+        selectedAxesHelper.dispose();
+        selectedAxesHelper = null;
+    }
+    removeAnchorHandles();
+    selectedObject = null;
+}
+
+// Group all scene objects under a temporary parent for manipulation as one
+let groupParent = null;
+let groupedOriginalPositions = []; // original world positions before grouping
+
+function selectAllObjects() {
+    if (sceneObjects.length === 0) return;
+    if (sceneObjects.length === 1) {
+        selectObject(sceneObjects[0]);
+        return;
+    }
+    deselectObject();
+
+    // Create a group parent at the centroid
+    const centroid = new THREE.Vector3();
+    for (const entry of sceneObjects) centroid.add(entry.mesh.position);
+    centroid.divideScalar(sceneObjects.length);
+
+    groupParent = new THREE.Group();
+    groupParent.position.copy(centroid);
+    scene.add(groupParent);
+
+    // Reparent all meshes into the group
+    groupedOriginalPositions = [];
+    for (const entry of sceneObjects) {
+        groupedOriginalPositions.push(entry.mesh.position.clone());
+        scene.remove(entry.mesh);
+        entry.mesh.position.sub(centroid); // offset relative to group center
+        groupParent.add(entry.mesh);
+    }
+
+    // Compute merged bounding box for the group
+    const mergedBox = new THREE.Box3();
+    for (const entry of sceneObjects) {
+        entry.mesh.geometry.computeBoundingBox();
+        const childBox = entry.mesh.geometry.boundingBox.clone();
+        childBox.min.multiply(entry.mesh.scale).add(entry.mesh.position);
+        childBox.max.multiply(entry.mesh.scale).add(entry.mesh.position);
+        mergedBox.union(childBox);
+    }
+    const size = new THREE.Vector3();
+    mergedBox.getSize(size);
+
+    // Create a virtual entry for the group
+    const groupGeo = new THREE.BoxGeometry(size.x, size.y, size.z);
+    const groupEntry = {
+        mesh: groupParent,
+        name: 'group',
+        _isGroup: true,
+        _groupGeo: groupGeo,
+    };
+
+    // Box helper around all
+    selectedBoxHelper = new THREE.Box3Helper(mergedBox, 0xe07020);
+    groupParent.add(selectedBoxHelper);
+
+    // Axes
+    const axisSize = Math.max(size.x, size.y, size.z) * 1.5;
+    selectedAxesHelper = new THREE.AxesHelper(axisSize);
+    selectedAxesHelper.material.depthTest = false;
+    selectedAxesHelper.renderOrder = 999;
+    groupParent.add(selectedAxesHelper);
+
+    selectedObject = groupEntry;
+    setCommandStatus(`Selected all ${sceneObjects.length} objects as group — drag to move, rotate, scale`);
+}
+
+function ungroupAllObjects() {
+    if (!groupParent) return;
+    // Reparent meshes back to scene with correct world transforms
+    const groupWorldPos = groupParent.position.clone();
+    const groupWorldQuat = groupParent.quaternion.clone();
+    const groupWorldScale = groupParent.scale.clone();
+
+    // Remove helpers from group first
+    if (selectedBoxHelper) {
+        groupParent.remove(selectedBoxHelper);
+        selectedBoxHelper.dispose();
+        selectedBoxHelper = null;
+    }
+    if (selectedAxesHelper) {
+        groupParent.remove(selectedAxesHelper);
+        selectedAxesHelper.dispose();
+        selectedAxesHelper = null;
+    }
+
+    for (const entry of sceneObjects) {
+        // Get current world position from group
+        entry.mesh.updateMatrixWorld(true);
+        const worldPos = new THREE.Vector3();
+        const worldQuat = new THREE.Quaternion();
+        const worldScale = new THREE.Vector3();
+        entry.mesh.matrixWorld.decompose(worldPos, worldQuat, worldScale);
+
+        groupParent.remove(entry.mesh);
+        entry.mesh.position.copy(worldPos);
+        entry.mesh.quaternion.copy(worldQuat);
+        entry.mesh.scale.copy(worldScale);
+        scene.add(entry.mesh);
+    }
+
+    scene.remove(groupParent);
+    groupParent = null;
+    groupedOriginalPositions = [];
+}
+
+function updateSelectedOutline() {
+    if (!selectedObject) return;
+    selectedObject.mesh.updateMatrixWorld(true);
+    if (selectedOutline) {
+        selectedOutline.matrix.copy(selectedObject.mesh.matrixWorld).scale(new THREE.Vector3(1.05, 1.05, 1.05));
+    }
+    if (selectedBoxHelper) {
+        if (typeof selectedBoxHelper.update === 'function') selectedBoxHelper.update();
+    }
+    // Skip axes/anchor updates for group selections (no geometry on Group)
+    if (selectedObject._isGroup) return;
+    // Update axes size if scale changed
+    if (selectedAxesHelper) {
+        selectedObject.mesh.geometry.computeBoundingSphere();
+        const newSize = (selectedObject.mesh.geometry.boundingSphere?.radius || 1) * selectedObject.mesh.scale.x * 2.5;
+        selectedObject.mesh.remove(selectedAxesHelper);
+        selectedAxesHelper.dispose();
+        selectedAxesHelper = new THREE.AxesHelper(newSize);
+        selectedAxesHelper.material.depthTest = false;
+        selectedAxesHelper.renderOrder = 999;
+        selectedObject.mesh.add(selectedAxesHelper);
+    }
+    updateAnchorPositions(selectedObject);
+}
+
+function mergeAllObjects() {
+    if (sceneObjects.length === 0) return;
+    saveUndo();
+    for (const entry of [...sceneObjects]) {
+        // Since objects are children of mesh, use their local matrix directly
+        const objGeo = entry.mesh.geometry.clone();
+        objGeo.applyMatrix4(entry.mesh.matrix);
+        const niPos = objGeo.attributes.position;
+        const eg = mesh.geometry;
+        const mp = new Float32Array(eg.attributes.position.count * 3 + niPos.count * 3);
+        mp.set(eg.attributes.position.array, 0);
+        mp.set(niPos.array, eg.attributes.position.count * 3);
+        const mg = new THREE.BufferGeometry();
+        mg.setAttribute('position', new THREE.BufferAttribute(mp, 3));
+        mg.computeVertexNormals();
+        mesh.geometry.dispose();
+        mesh.geometry = mg;
+        objGeo.dispose();
+        mesh.remove(entry.mesh);
+        entry.mesh.geometry.dispose();
+        entry.mesh.material.dispose();
+    }
+    sceneObjects.length = 0;
+    deselectObject();
+    refreshWireframe();
+    setCommandStatus('All objects merged into main mesh!');
+}
+
+// Texture presets
+const TEXTURES = {
+    matte:     { roughness: 0.9,  metalness: 0.0,  transparent: false, opacity: 1,    wireframe: false },
+    glossy:    { roughness: 0.15, metalness: 0.1,  transparent: false, opacity: 1,    wireframe: false },
+    metallic:  { roughness: 0.2,  metalness: 0.8,  transparent: false, opacity: 1,    wireframe: false },
+    wireframe: { roughness: 0.5,  metalness: 0.0,  transparent: false, opacity: 1,    wireframe: true  },
+    clay:      { roughness: 0.35, metalness: 0.1,  transparent: false, opacity: 1,    wireframe: false },
+    glass:     { roughness: 0.05, metalness: 0.1,  transparent: true,  opacity: 0.4,  wireframe: false },
+};
+
+function applyTexture(name) {
+    const t = TEXTURES[name];
+    if (!t) return;
+    Object.assign(material, t);
+    material.needsUpdate = true;
+}
 
 function setShape(name) {
     if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
     const geo = SHAPES[name]().toNonIndexed();
     geo.computeVertexNormals();
     mesh = new THREE.Mesh(geo, material);
-    selectionState.active = false;
-    selectionState.kind = 'none';
-    selectionState.logicalVertexIds = new Set();
-    selectionState.boundaryVertexIds = new Set();
     refreshWireframe();
-    rebuildTopologyCache();
     scene.add(mesh);
     currentShape = name;
-    syncShapeUi(name);
+    syncShapeUI(name);
 }
 
 function refreshWireframe() {
@@ -314,684 +842,358 @@ function refreshWireframe() {
     mesh.add(wireframe);
 }
 
-function addShapeToMesh(name, ox, oy, oz, scale) {
+function addShapeToMesh(name, ox, oy, oz, scale, localNormal, userRotation) {
     const ng = SHAPES[name]();
-    // IMPORTANT: scale BEFORE translate so the placement offset stays in local-mesh
-    // coordinates. (translate-then-scale would multiply the offset by `scale`, putting
-    // the new shape far from the preview position.)
-    ng.scale(scale, scale, scale); ng.translate(ox, oy, oz);
+    ng.scale(scale, scale, scale);
+
+    // Align shape's "up" (Y) with the surface normal at placement point
+    const up = new THREE.Vector3(0, 1, 0);
+    const norm = localNormal ? localNormal.clone().normalize() : up.clone();
+    const rotQ = new THREE.Quaternion();
+    rotQ.setFromUnitVectors(up, norm);
+
+    // Apply user rotation on top of normal alignment
+    if (userRotation) {
+        const userQ = new THREE.Quaternion().setFromEuler(userRotation);
+        rotQ.multiply(userQ);
+    }
+
+    ng.applyQuaternion(rotQ);
+
+    // Translate to placement point
+    ng.translate(ox, oy, oz);
+
     const ni = ng.toNonIndexed();
+
+    // Merge geometries — shape maintains its original form
+    const niPos = ni.attributes.position;
     const eg = mesh.geometry;
-    const mp = new Float32Array(eg.attributes.position.count * 3 + ni.attributes.position.count * 3);
+    const prevCount = eg.attributes.position.count;
+    const mp = new Float32Array(prevCount * 3 + niPos.count * 3);
     mp.set(eg.attributes.position.array, 0);
-    mp.set(ni.attributes.position.array, eg.attributes.position.count * 3);
-    const mn = new Float32Array(eg.attributes.normal.count * 3 + ni.attributes.normal.count * 3);
-    mn.set(eg.attributes.normal.array, 0);
-    mn.set(ni.attributes.normal.array, eg.attributes.normal.count * 3);
+    mp.set(niPos.array, prevCount * 3);
+
     const mg = new THREE.BufferGeometry();
     mg.setAttribute('position', new THREE.BufferAttribute(mp, 3));
-    mg.setAttribute('normal', new THREE.BufferAttribute(mn, 3));
-    mesh.geometry.dispose(); mesh.geometry = mg;
+    mg.computeVertexNormals();
+    mesh.geometry.dispose();
+    mesh.geometry = mg;
     refreshWireframe();
-    rebuildTopologyCache();
+
+    // Track last added shape vertices for array duplication
+    lastAddedRange = { start: prevCount, count: niPos.count };
+
     ng.dispose(); ni.dispose();
 }
 
-// Pre-merge "swell": push existing mesh vertices outward so they wrap the
-// bounding sphere of the placement shape. This eliminates the tell-tale
-// concave seam where added geometry would otherwise float above a flat surface.
-// `centerLocal` and `radius` are in local-mesh coordinates.
-function swellMeshAround(centerLocal, radius, blendStrength) {
-    const p = mesh.geometry.attributes.position;
-    // Halo extends a bit beyond the merge sphere so the transition tapers smoothly.
-    const halo = radius * (1.4 + blendStrength * 0.8);
-    const halo2 = halo * halo;
-    const target = radius * 0.92; // just inside the new shape's surface
-    for (let i = 0; i < p.count; i++) {
-        const vx = p.getX(i), vy = p.getY(i), vz = p.getZ(i);
-        const dx = vx - centerLocal.x, dy = vy - centerLocal.y, dz = vz - centerLocal.z;
-        const d2 = dx*dx + dy*dy + dz*dz;
-        if (d2 >= halo2) continue;
-        const d = Math.sqrt(d2);
-        if (d >= target) continue;        // already outside the new shape — leave alone
-        if (d < 1e-5) continue;            // skip the singular center point
-        // Cosine falloff: full push at center, tapering to zero at halo.
-        const t = d / halo;
-        const fall = 0.5 * (1 + Math.cos(Math.PI * t));
-        // How much to push: bring vertex up to `target` distance, weighted by falloff and blendStrength.
-        const push = (target - d) * fall * (0.6 + blendStrength * 0.4);
-        const inv = 1 / d;
-        p.setXYZ(i,
-            vx + dx * inv * push,
-            vy + dy * inv * push,
-            vz + dz * inv * push,
-        );
-    }
-    p.needsUpdate = true;
-    mesh.geometry.computeVertexNormals();
-}
-
-function rebuildTopologyCache() {
-    if (!mesh?.geometry?.attributes?.position) return;
+// ============================================================
+// 2c. PATTERN WRAP — duplicate a shape around the object surface
+// ============================================================
+function patternWrap(shapeName, scale, count, mode) {
+    // mode: 'ring' (horizontal), 'vertical', 'all'
+    saveUndo();
     const pos = mesh.geometry.attributes.position;
-    const norm = mesh.geometry.attributes.normal;
-    const vertexMap = new Map();
-    const logicalVertices = [];
-    const bufferToLogical = new Array(pos.count);
-    const keyScale = 1000;
 
-    function makeKey(x, y, z) {
-        return `${Math.round(x * keyScale)}:${Math.round(y * keyScale)}:${Math.round(z * keyScale)}`;
-    }
-
-    const v = new THREE.Vector3();
-    const n = new THREE.Vector3();
+    // Find mesh center
+    let cx = 0, cy = 0, cz = 0;
     for (let i = 0; i < pos.count; i++) {
-        v.fromBufferAttribute(pos, i);
-        const key = makeKey(v.x, v.y, v.z);
-        let logicalId = vertexMap.get(key);
-        if (logicalId === undefined) {
-            logicalId = logicalVertices.length;
-            vertexMap.set(key, logicalId);
-            logicalVertices.push({
-                id: logicalId,
-                position: v.clone(),
-                normal: new THREE.Vector3(),
-                bufferIndices: [],
-            });
+        cx += pos.getX(i); cy += pos.getY(i); cz += pos.getZ(i);
+    }
+    cx /= pos.count; cy /= pos.count; cz /= pos.count;
+    const center = new THREE.Vector3(cx, cy, cz).applyMatrix4(mesh.matrixWorld);
+
+    // Helper: raycast from center outward to find actual surface point
+    const patternRay = new THREE.Raycaster();
+    function findSurfacePoint(direction) {
+        const dir = direction.clone().normalize();
+        // Start ray from well outside the mesh, pointing inward
+        const origin = center.clone().addScaledVector(dir, 10);
+        patternRay.set(origin, dir.clone().negate());
+        const hits = patternRay.intersectObject(mesh);
+        if (hits.length > 0) {
+            const hit = hits[0];
+            const norm = hit.face?.normal
+                ? hit.face.normal.clone().transformDirection(mesh.matrixWorld).normalize()
+                : dir.clone();
+            // Place slightly above surface
+            const surfacePos = hit.point.clone().addScaledVector(norm, scale * 0.3);
+            // Convert to mesh local space
+            const invMatrix = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+            const localPos = surfacePos.applyMatrix4(invMatrix);
+            const localNorm = norm.transformDirection(invMatrix).normalize();
+            return { pos: localPos, norm: localNorm };
         }
-        const logical = logicalVertices[logicalId];
-        logical.bufferIndices.push(i);
-        if (norm) {
-            n.fromBufferAttribute(norm, i);
-            logical.normal.add(n);
+        return null;
+    }
+
+    let placed = 0;
+
+    if (mode === 'ring') {
+        for (let i = 0; i < count; i++) {
+            const angle = (i / count) * Math.PI * 2;
+            const dir = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+            const hit = findSurfacePoint(dir);
+            if (hit) { addShapeToMesh(shapeName, hit.pos.x, hit.pos.y, hit.pos.z, scale, hit.norm); placed++; }
         }
-        bufferToLogical[i] = logicalId;
-    }
-
-    const adjacency = logicalVertices.map(() => new Set());
-    for (let i = 0; i < pos.count; i += 3) {
-        const a = bufferToLogical[i];
-        const b = bufferToLogical[i + 1];
-        const c = bufferToLogical[i + 2];
-        adjacency[a].add(b); adjacency[a].add(c);
-        adjacency[b].add(a); adjacency[b].add(c);
-        adjacency[c].add(a); adjacency[c].add(b);
-    }
-    logicalVertices.forEach(vtx => {
-        if (vtx.normal.lengthSq() < 1e-6) vtx.normal.set(0, 0, 1);
-        else vtx.normal.normalize();
-    });
-
-    topologyCache.logicalVertices = logicalVertices;
-    topologyCache.bufferToLogical = bufferToLogical;
-    topologyCache.adjacency = adjacency;
-    topologyCache.version++;
-}
-
-function refreshSelectionFromTopology() {
-    if (!selectionState.active || selectionState.logicalVertexIds.size === 0) {
-        selectionState.kind = 'none';
-        selectionState.active = false;
-        return;
-    }
-    const nextIds = new Set();
-    let px = 0, py = 0, pz = 0;
-    let nx = 0, ny = 0, nz = 0;
-    for (const logicalId of selectionState.logicalVertexIds) {
-        const logical = topologyCache.logicalVertices[logicalId];
-        if (!logical) continue;
-        nextIds.add(logicalId);
-        px += logical.position.x; py += logical.position.y; pz += logical.position.z;
-        nx += logical.normal.x; ny += logical.normal.y; nz += logical.normal.z;
-    }
-    if (!nextIds.size) {
-        selectionState.kind = 'none';
-        selectionState.active = false;
-        return;
-    }
-    selectionState.logicalVertexIds = nextIds;
-    selectionState.pointLocal.set(px / nextIds.size, py / nextIds.size, pz / nextIds.size);
-    selectionState.normalLocal.set(nx, ny, nz).normalize();
-    const boundary = new Set();
-    for (const logicalId of nextIds) {
-        const neighbors = topologyCache.adjacency[logicalId] || [];
-        for (const neighborId of neighbors) {
-            if (!nextIds.has(neighborId)) {
-                boundary.add(logicalId);
-                break;
-            }
+    } else if (mode === 'vertical') {
+        for (let i = 0; i < count; i++) {
+            const t = (i / (count - 1 || 1)) * Math.PI;
+            const dir = new THREE.Vector3(Math.sin(t), Math.cos(t), 0);
+            const hit = findSurfacePoint(dir);
+            if (hit) { addShapeToMesh(shapeName, hit.pos.x, hit.pos.y, hit.pos.z, scale, hit.norm); placed++; }
         }
-    }
-    selectionState.boundaryVertexIds = boundary;
-    selectionState.kind = 'region';
-    selectionState.active = true;
-}
-
-setShape('sphere');
-
-// ============================================================
-// 1b. WORKSHOPS — top-bar themed presets (changes scene material + grid + lights)
-// ============================================================
-const WORKSHOPS = {
-    default: { matColor: 0xa8c3e6, metalness: 0.10, roughness: 0.35, gridColor: 0x7b8b6f, ambient: 0xffffff, dir: 0xffffff, crochet: 0 },
-    metal:   { matColor: 0x8a93a3, metalness: 0.92, roughness: 0.12, gridColor: 0x00e5ff, ambient: 0x202833, dir: 0xffd4f0, crochet: 0 },
-    wood:    { matColor: 0xb07a47, metalness: 0.05, roughness: 0.85, gridColor: 0x8b5a2b, ambient: 0xffeacc, dir: 0xfff0d4, crochet: 0 },
-    // Crochet base colour: pure white. Combined with the shader's mild gap
-    // darkening (uCrochetDark = 0.18), the perceived surface lands around
-    // eggshell white (~#f5f5f5).
-    // Lights kept neutral white so the colour reads true on the object — the
-    // pink cottagecore *room* still comes from the CSS background.
-    crochet: { matColor: 0xffffff, metalness: 0.00, roughness: 0.95, gridColor: 0xd28aae, ambient: 0xffffff, dir: 0xffffff, crochet: 1 },
-};
-let currentWorkshop = 'default';
-function applyWorkshop(name) {
-    if (!WORKSHOPS[name]) return;
-    currentWorkshop = name;
-    document.body.dataset.workshop = name;
-    const w = WORKSHOPS[name];
-    material.color.setHex(w.matColor);
-    material.metalness = w.metalness;
-    material.roughness = w.roughness;
-    material.transparent = false;
-    material.opacity = 1;
-    material.wireframe = false;
-    // Toggle the crochet shader uniform (no recompile — the shader checks the uniform at runtime).
-    material.userData.uCrochet.value = w.crochet ? 1.0 : 0.0;
-    material.needsUpdate = true;
-    scene.traverse(o => {
-        if (o.isAmbientLight) o.color.setHex(w.ambient);
-        else if (o.isDirectionalLight) o.color.setHex(w.dir);
-    });
-    grid.material.color.setHex(w.gridColor);
-    document.querySelectorAll('.ws-btn').forEach(b =>
-        b.classList.toggle('active', b.dataset.workshop === name));
-}
-// Wired up at the bottom (after saveUndo is defined)
-
-// Shape Palette UI
-const palette = document.createElement('div');
-palette.id = 'shape-palette';
-palette.style.cssText = 'position:absolute;top:86px;left:18px;z-index:15;display:flex;flex-direction:column;gap:8px;width:210px;';
-palette.innerHTML = '<div style="font-weight:700;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:#5a6652;padding-left:6px;">Objects</div>';
-const emojis = { sphere:'🔴', cube:'🟦', cylinder:'🫙', cone:'🔺', torus:'🍩' };
-const PALETTE_SHAPES = ['sphere', 'cube', 'cylinder', 'cone', 'torus'];
-for (const name of PALETTE_SHAPES) {
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:8px;align-items:stretch;';
-    const btn = document.createElement('button');
-    btn.dataset.shapeSwap = name;
-    btn.innerHTML = `<span style="font-size:15px;line-height:1">${emojis[name]}</span><span style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;"><strong style="font-size:12px;line-height:1">${SHAPE_LABELS[name] || name}</strong><span style="font-size:10px;opacity:0.72;line-height:1">click to swap</span></span>`;
-    btn.className = 'pal-btn';
-    btn.style.cssText = 'flex:1;display:flex;align-items:center;gap:8px;background:rgba(248,238,219,0.92);border:1.5px solid #7b8b6f;border-radius:14px;padding:10px 12px;cursor:pointer;font-size:12px;font-family:inherit;color:#2b332b;text-align:left;box-shadow:0 6px 18px rgba(0,0,0,0.06);';
-    btn.addEventListener('click', () => { saveUndo(); setShape(name); });
-    if (name==='sphere') btn.style.borderWidth='3px';
-    const add = document.createElement('button');
-    add.textContent = '➕'; add.title = `Add ${name} (click to enter placement mode, Esc to exit)`;
-    add.className = 'pal-add';
-    add.dataset.shape = name;
-    add.style.cssText = 'min-width:38px;background:rgba(248,238,219,0.95);border:1.5px solid #7b8b6f;border-radius:14px;padding:0 10px;cursor:pointer;font-size:14px;box-shadow:0 6px 18px rgba(0,0,0,0.06);';
-    add.addEventListener('click', () => {
-        if (placementShape === name) cancelPlacement();
-        else startPlacement(name);
-    });
-    row.appendChild(btn); row.appendChild(add); palette.appendChild(row);
-}
-document.body.appendChild(palette);
-
-// mark palette for docking
-palette.classList.add('left-palette');
-
-// Placement mode — click to set position, drag to scale, release to commit
-let placementShape = null;
-let placementPreview = null;  // THREE.Mesh preview
-let placementPos = null;      // local position {x,y,z}
-let placementNormal = null;   // local normal
-let placementStartY = 0;      // mouseY at click start
-let placementStartX = 0;      // mouseX at click start (for depth control)
-let placementDragging = false;
-
-// --- Gesture-driven placement state -----------------------------------------
-// When `placementShape` is set + user pinches: preview spawns at the raycast
-// hit on the mesh, distance(thumb,index) → size, hand-z (forward/back) → depth.
-// Releasing the pinch commits & merges. All values smoothed via lerp to hide
-// MediaPipe jitter.
-let gesturePlacing = false;
-let gesturePinchStartZ = null;     // wrist z at pinch start (relative reference)
-let gesturePinchStartDist = null;  // initial finger distance for size baseline
-let smoothedPos = new THREE.Vector3();
-let smoothedScale = 0.3;
-let smoothedDepth = 0.5;
-let smoothedBlend = 0.7;
-
-const placementLabel = document.createElement('div');
-placementLabel.style.cssText = 'display:none;position:absolute;bottom:172px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(248,238,219,0.96);border:1.5px solid #7b8b6f;border-radius:999px;padding:10px 18px;font-size:13px;font-family:inherit;color:#2b332b;pointer-events:none;box-shadow:0 10px 24px rgba(0,0,0,0.12);';
-document.body.appendChild(placementLabel);
-
-const previewMat = new THREE.MeshStandardMaterial({ color: 0xffdd57, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
-
-function getPlacementDefaults(shapeName = currentShape) {
-    if (interactionState.lastAddSpec && interactionState.lastAddSpec.shape === shapeName) {
-        return { ...interactionState.lastAddSpec };
-    }
-    return { shape: shapeName, scale: 0.3, depth: 0.5, blendStrength: 0.7, variant: 'default' };
-}
-
-function capturePlacementSpec(shapeName, scale, depth, blendStrength) {
-    const spec = {
-        shape: shapeName,
-        scale,
-        depth,
-        blendStrength,
-        variant: shapeName,
-    };
-    interactionState.lastAddSpec = spec;
-    interactionState.placementSpec = { ...spec };
-}
-
-function startPlacement(n, spec = null) {
-    interactionState.placementSpec = { ...getPlacementDefaults(n), ...(spec || {}), shape: n, variant: n };
-    placementShape = n;
-    smoothedScale = interactionState.placementSpec.scale;
-    smoothedDepth = interactionState.placementSpec.depth;
-    smoothedBlend = interactionState.placementSpec.blendStrength;
-    document.body.style.cursor = 'crosshair';
-    placementLabel.textContent = `Placement: ${SHAPE_LABELS[n] || n} · drag to size/depth · pinch to place with hands · Esc cancels`;
-    placementLabel.style.display = 'block';
-    // Highlight the active palette button so the user can see they're in placement mode.
-    document.querySelectorAll('.pal-add').forEach(b => b.classList.toggle('active', b.dataset.shape === n));
-}
-
-// Exit placement mode after a successful commit: clears the in-flight preview/drag
-// state and disarms `placementShape` so the next shape must be explicitly armed
-// again with the + button.
-function finishPlacement() {
-    placementDragging = false;
-    placementPos = null;
-    placementNormal = null;
-    gesturePlacing = false;
-    gesturePinchStartZ = null;
-    gesturePinchStartDist = null;
-    placementShape = null;
-    interactionState.activeOperation = null;
-    if (placementPreview) {
-        scene.remove(placementPreview);
-        placementPreview.geometry.dispose();
-        placementPreview = null;
-    }
-    document.body.style.cursor = '';
-    placementLabel.style.display = 'none';
-    document.querySelectorAll('.pal-add').forEach(b => b.classList.remove('active'));
-    closeBlendPanel();
-}
-
-function cancelPlacement() {
-    placementShape = null;
-    placementDragging = false;
-    placementPos = null;
-    gesturePlacing = false;
-    gesturePinchStartZ = null;
-    gesturePinchStartDist = null;
-    interactionState.activeOperation = null;
-    if (placementPreview) { scene.remove(placementPreview); placementPreview.geometry.dispose(); placementPreview = null; }
-    document.body.style.cursor = '';
-    placementLabel.style.display = 'none';
-    document.querySelectorAll('.pal-add').forEach(b => b.classList.remove('active'));
-    closeBlendPanel();
-}
-
-// Update the preview from a 2D drag: vertical = size, horizontal = depth.
-// Vertical up → bigger. Horizontal right → extrude (depth → +1), left → indent (-1).
-// Default depth at click time is 0.5 (half-buried = naturally merged look).
-function updatePreviewFromDrag(mouseX, mouseY) {
-    if (!placementPreview || !placementPos || !placementNormal) return;
-    const baseScale = interactionState.placementSpec?.scale ?? 0.3;
-    const baseDepth = interactionState.placementSpec?.depth ?? 0.5;
-    const sDelta = (placementStartY - mouseY) * 0.005;
-    const dDelta = (mouseX - placementStartX) * 0.004;
-    const s = Math.max(0.1, Math.min(2.0, baseScale + sDelta));
-    const d = Math.max(-1.0, Math.min(1.0, baseDepth + dDelta));
-    blendDepth = d;
-    smoothedScale = s;
-    smoothedDepth = d;
-    placementPreview.scale.setScalar(s);
-    const localCenter = new THREE.Vector3(
-        placementPos.x + placementNormal.x * s * d,
-        placementPos.y + placementNormal.y * s * d,
-        placementPos.z + placementNormal.z * s * d,
-    );
-    placementPreview.position.copy(localCenter.applyMatrix4(mesh.matrixWorld));
-    placementPreview.material.color.setHex(d < 0 ? 0xff7eb6 : 0xffdd57);
-    placementLabel.textContent =
-        `Size ${s.toFixed(2)}  ·  Depth ${d>=0?'+':''}${d.toFixed(2)} ${d<0?'(indent)':'(extrude)'}  ·  release to lock`;
-}
-
-// Smoothly lerp the live preview toward target values driven by hand gestures.
-// Called every animation frame while `gesturePlacing` is true.
-function applyGesturePlacement() {
-    if (!placementPreview || !placementPos || !placementNormal) return;
-    const s = smoothedScale;
-    const d = smoothedDepth;
-    blendDepth = d;
-    placementPreview.scale.setScalar(s);
-    const localCenter = new THREE.Vector3(
-        placementPos.x + placementNormal.x * s * d,
-        placementPos.y + placementNormal.y * s * d,
-        placementPos.z + placementNormal.z * s * d,
-    );
-    placementPreview.position.copy(localCenter.applyMatrix4(mesh.matrixWorld));
-    placementPreview.material.color.setHex(d < 0 ? 0xff7eb6 : 0xffdd57);
-    placementLabel.textContent =
-        `🖐️  Size ${s.toFixed(2)}  ·  Depth ${d>=0?'+':''}${d.toFixed(2)} ${d<0?'(indent)':'(extrude)'}  ·  release pinch to lock`;
-}
-
-// ----- Blend mode (extrude / indent + seamless merge) -----
-// After mouseup-to-finish-resize, we enter blend mode instead of committing immediately.
-// User adjusts depth (-1=indent, +1=extrude) and blend (0=hard, 1=fully smoothed seam).
-// Closed-fist hand gesture moving forward/back also drives depth.
-const blendPanel = document.createElement('div');
-blendPanel.id = 'blend-panel';
-blendPanel.innerHTML = `
-    <h3>✨ Blend & Merge</h3>
-    <label>Depth (–1 indent · 0 surface · +1 extrude)</label>
-    <input type="range" id="bl-depth" min="-1" max="1" step="0.05" value="0.5">
-    <div class="row"><span>Indent</span><span id="bl-depth-v">+0.50</span><span>Extrude</span></div>
-    <label>Blend (seamless merge)</label>
-    <input type="range" id="bl-blend" min="0" max="1" step="0.05" value="0.7">
-    <div class="row"><span>Hard</span><span id="bl-blend-v">0.70</span><span>Soft</span></div>
-    <div class="btns">
-        <button id="bl-cancel">Cancel</button>
-        <button id="bl-confirm" class="primary">Confirm ✓</button>
-    </div>
-    <div class="gesture-hint">Tip: make a fist and move forward/back to control depth</div>
-`;
-document.body.appendChild(blendPanel);
-
-let blendDepth = 0.5, blendStrength = 0.7;
-const blDepthEl = blendPanel.querySelector('#bl-depth');
-const blBlendEl = blendPanel.querySelector('#bl-blend');
-const blDepthV  = blendPanel.querySelector('#bl-depth-v');
-const blBlendV  = blendPanel.querySelector('#bl-blend-v');
-function fmtSigned(n) { return (n>=0?'+':'') + n.toFixed(2); }
-blDepthEl.addEventListener('input', e => { blendDepth = parseFloat(e.target.value); blDepthV.textContent = fmtSigned(blendDepth); updateBlendPreview(); });
-blBlendEl.addEventListener('input', e => { blendStrength = parseFloat(e.target.value); blBlendV.textContent = blendStrength.toFixed(2); });
-blendPanel.querySelector('#bl-cancel').addEventListener('click', cancelPlacement);
-blendPanel.querySelector('#bl-confirm').addEventListener('click', commitPlacementBlended);
-
-function openBlendPanel() {
-    blendDepth = interactionState.placementSpec?.depth ?? 0.5;
-    blendStrength = interactionState.placementSpec?.blendStrength ?? 0.7;
-    blDepthEl.value = blendDepth; blDepthV.textContent = fmtSigned(blendDepth);
-    blBlendEl.value = blendStrength; blBlendV.textContent = blendStrength.toFixed(2);
-    blendPanel.classList.add('open');
-    placementLabel.style.display = 'none';
-    updateBlendPreview();
-}
-function closeBlendPanel() {
-    blendPanel.classList.remove('open');
-}
-function updateBlendPreview() {
-    if (!placementPreview || !placementPos || !placementNormal) return;
-    const s = placementPreview.scale.x;
-    // placementPos is the surface hit point in LOCAL coords. Center of new shape sits
-    // at anchor + normal * (depth * s).
-    const off = blendDepth * s;
-    const local = new THREE.Vector3(
-        placementPos.x + placementNormal.x * off,
-        placementPos.y + placementNormal.y * off,
-        placementPos.z + placementNormal.z * off,
-    );
-    placementPreview.position.copy(local.applyMatrix4(mesh.matrixWorld));
-    if (blendDepth < 0) placementPreview.material.color.setHex(0xff7eb6);
-    else placementPreview.material.color.setHex(0xffdd57);
-}
-
-// Commit gesture placement cleanly — shape sits on surface without distortion
-function commitGesturePlacement() {
-    if (!placementPreview || !placementPos || !placementNormal) { finishPlacement(); return; }
-    saveUndo();
-
-    const s = smoothedScale;  // Use the smoothed scale from gesture
-    const anchor = { x: placementPos.x, y: placementPos.y, z: placementPos.z };
-    const localNormal = placementNormal.clone();
-
-    // Keep the inserted shape's original form intact.
-    // Only bias it slightly into the surface so it reads as attached, not floating.
-    const offset = smoothedDepth * s * 0.2;
-    const center = {
-        x: anchor.x + localNormal.x * offset,
-        y: anchor.y + localNormal.y * offset,
-        z: anchor.z + localNormal.z * offset,
-    };
-
-    // Add the new shape geometry cleanly
-    addShapeToMesh(placementShape, center.x, center.y, center.z, s);
-    capturePlacementSpec(placementShape, s, smoothedDepth, blendStrength);
-
-    // Keep placement mode sticky for rapid repeat-adding
-    finishPlacement();
-    if(isDebug) console.log('✅ Gesture placement committed');
-}
-
-function commitPlacementBlended() {
-    if (!placementPreview || !placementPos || !placementNormal) { cancelPlacement(); return; }
-    saveUndo();
-
-    const s = placementPreview.scale.x;
-    // Anchor = the actual surface hit point in local-mesh coords (placementPos is now
-    // stored without any offset baked in).
-    const anchor = { x: placementPos.x, y: placementPos.y, z: placementPos.z };
-    const localNormal = placementNormal.clone();
-
-    if (blendDepth < 0) {
-        // INDENT: push original mesh vertices inward at the anchor
-        const indentRadius = s * 1.5;
-        const indentDepth  = Math.abs(blendDepth) * s * 1.5;
-        const p = mesh.geometry.attributes.position;
-        const r2 = indentRadius * indentRadius;
-        for (let i = 0; i < p.count; i++) {
-            const vx = p.getX(i), vy = p.getY(i), vz = p.getZ(i);
-            const dx = vx - anchor.x, dy = vy - anchor.y, dz = vz - anchor.z;
-            const d2 = dx*dx + dy*dy + dz*dz;
-            if (d2 < r2) {
-                const f = 0.5 * (1 + Math.cos(Math.PI * Math.sqrt(d2) / indentRadius));
-                p.setXYZ(i,
-                    vx - localNormal.x * indentDepth * f,
-                    vy - localNormal.y * indentDepth * f,
-                    vz - localNormal.z * indentDepth * f);
-            }
-        }
-        p.needsUpdate = true;
-        mesh.geometry.computeVertexNormals();
-        // Smoothing pass for seamless seam
-        if (blendStrength > 0) {
-            const oldR = brushRadius;
-            brushRadius = indentRadius * (1.2 + blendStrength * 0.8);
-            const wp = new THREE.Vector3(anchor.x, anchor.y, anchor.z).applyMatrix4(mesh.matrixWorld);
-            const passes = Math.round(2 + blendStrength * 4);
-            for (let k = 0; k < passes; k++) smoothAt(wp);
-            brushRadius = oldR;
-        }
-        refreshWireframe();
-        rebuildTopologyCache();
     } else {
-        // POSITIVE PLACEMENT: keep the added primitive rigid and recognizable.
-        // Mouse placement should behave like stamping a clean shape onto the surface,
-        // not like re-sculpting or melting that shape into the host mesh.
-        const offset = blendDepth * s;
-        const center = {
-            x: anchor.x + localNormal.x * offset,
-            y: anchor.y + localNormal.y * offset,
-            z: anchor.z + localNormal.z * offset,
-        };
-
-        // Slightly bias the shape into the surface so it reads as attached, while
-        // preserving the primitive's own silhouette.
-        center.x -= localNormal.x * s * 0.08;
-        center.y -= localNormal.y * s * 0.08;
-        center.z -= localNormal.z * s * 0.08;
-
-        addShapeToMesh(placementShape, center.x, center.y, center.z, s);
+        // 'all' — Fibonacci spiral distribution
+        const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+        for (let i = 0; i < count; i++) {
+            const y = 1 - (i / (count - 1 || 1)) * 2;
+            const radiusAtY = Math.sqrt(1 - y * y);
+            const angle = goldenAngle * i;
+            const dir = new THREE.Vector3(Math.cos(angle) * radiusAtY, y, Math.sin(angle) * radiusAtY);
+            const hit = findSurfacePoint(dir);
+            if (hit) { addShapeToMesh(shapeName, hit.pos.x, hit.pos.y, hit.pos.z, scale, hit.norm); placed++; }
+        }
     }
-
-    capturePlacementSpec(placementShape, s, blendDepth, blendStrength);
-    // Sticky mode: keep `placementShape` selected for rapid repeat-adding.
-    finishPlacement();
+    refreshWireframe();
+    setCommandStatus(`Pattern: ${placed}× ${SHAPE_LABELS[shapeName] || shapeName} (${mode})`);
 }
-
-window.addEventListener('keydown', e => {
-    if (e.key === 'Escape') {
-        if (interactionState.activeOperation) OperationController.cancel();
-        else if (placementShape || placementPreview) cancelPlacement();
-        else if (gestureSelection.active) SelectionController.clear();
-    }
-    if (e.key === 'x' && !e.target.closest('input') && !splitActive) { saveUndo(); splitMesh(0.5); setTimeout(finalizeSplit, 500); }
-});
 
 // ============================================================
-// 3. SCULPT TOOLS
+// 2b. ADD SHAPE PREVIEW SYSTEM
 // ============================================================
-let brushRadius = 0.4, sculptStrength = 0.04;
-let activeTool = 'pull';
-let symmetryX = false;
+const addShapePreviewMat = new THREE.MeshStandardMaterial({
+    color: 0xffdd57,
+    transparent: true,
+    opacity: 0.35,
+    roughness: 0.5,
+    metalness: 0.0,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+});
+const addShapePreviewWireMat = new THREE.LineBasicMaterial({
+    color: 0xffdd57,
+    transparent: true,
+    opacity: 0.7,
+});
 
-// Tool panel
-const toolPanel = document.createElement('div');
-toolPanel.style.cssText = 'position:absolute;top:320px;left:20px;z-index:15;background:rgba(248,238,219,0.95);border:1.5px solid #7b8b6f;border-radius:18px;padding:12px 14px;font-size:12px;font-family:inherit;color:#2b332b;width:175px;box-shadow:0 12px 30px rgba(0,0,0,0.10);';
-toolPanel.innerHTML = `
-    <div style="font-weight:700;margin-bottom:6px;letter-spacing:0.08em;text-transform:uppercase;font-size:11px;color:#5a6652;">Sculpt Tools</div>
-    <div id="tool-btns" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;"></div>
-    <div style="font-weight:600;margin-bottom:4px;">Brush Size</div>
-    <input type="range" id="br" min="0.1" max="1.5" step="0.05" value="0.4" style="width:100%;">
-    <div style="display:flex;justify-content:space-between;font-size:10px;"><span>Small</span><span id="brv">0.40</span><span>Big</span></div>
-    <div style="font-weight:600;margin:6px 0 4px;">Brush Strength</div>
-    <input type="range" id="sr" min="0.01" max="0.12" step="0.005" value="0.04" style="width:100%;">
-    <div style="display:flex;justify-content:space-between;font-size:10px;"><span>Soft</span><span id="srv">0.040</span><span>Hard</span></div>
-    <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">
-        <button id="sym-btn" style="flex:1;padding:4px;border:1.5px solid #7b8b6f;border-radius:6px;background:#fff;cursor:pointer;font-size:11px;">🪞 Sym</button>
-        <button id="undo-btn" style="flex:1;padding:4px;border:1.5px solid #7b8b6f;border-radius:6px;background:#fff;cursor:pointer;font-size:11px;">↩ Undo</button>
-        <button id="export-btn" style="flex:1;padding:4px;border:1.5px solid #7b8b6f;border-radius:6px;background:#fff;cursor:pointer;font-size:11px;">💾 STL</button>
-    </div>
-`;
-document.body.appendChild(toolPanel);
+let addShapePreviewMesh = null;
+let addShapePreviewWire = null;
+let addShapeMode = false;        // true when "Add" tool is active
+let addShapeType = 'sphere';     // which shape to add
+let addShapePosition = new THREE.Vector3(); // world position of preview
+let addShapeHitNormal = new THREE.Vector3(0, 1, 0); // surface normal at placement
+let addShapeScale = 0.5;         // current preview scale
+let addShapeBaseRadius = 1;      // geometry bounding sphere radius at scale 1
+let addShapeBaseHandScale = null; // baseline hand scale for cupped resizing
+let addShapeVisible = false;     // is there a valid placement point?
+let addShapeSurfaceHit = new THREE.Vector3(); // raw surface hit point (before offset)
+let addShapeRotation = new THREE.Euler(0, 0, 0); // user rotation of preview
 
-// mark tool panel for docking
-toolPanel.classList.add('left-tools');
+function createAddShapePreview(shapeName) {
+    // Remove old preview
+    removeAddShapePreview();
+    const geo = SHAPES[shapeName]();
+    geo.computeBoundingSphere();
+    addShapeBaseRadius = geo.boundingSphere ? geo.boundingSphere.radius : 1;
+    addShapePreviewMesh = new THREE.Mesh(geo, addShapePreviewMat);
+    addShapePreviewMesh.renderOrder = 500;
+    addShapePreviewMesh.visible = false;
+    scene.add(addShapePreviewMesh);
 
-// Create a left dock to group palette and tools and a toggle to collapse them
-;(function createLeftDock(){
-    const leftDock = document.createElement('div');
-    leftDock.id = 'left-dock';
-    document.body.appendChild(leftDock);
+    addShapePreviewWire = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo, 15),
+        addShapePreviewWireMat
+    );
+    addShapePreviewWire.renderOrder = 501;
+    addShapePreviewMesh.add(addShapePreviewWire);
+}
 
-    // Move existing palette and toolPanel into dock
-    if (palette) leftDock.appendChild(palette);
-    if (toolPanel) leftDock.appendChild(toolPanel);
-
-    // Add small toggle button to show/hide dock
-    const toggle = document.createElement('button');
-    toggle.id = 'left-dock-toggle';
-    toggle.title = 'Toggle tools';
-    toggle.textContent = '☰';
-    document.body.appendChild(toggle);
-    toggle.addEventListener('click', () => leftDock.classList.toggle('collapsed'));
-
-    // Auto-collapse on small screens for clarity
-    function adaptDock() {
-        if (innerWidth <= 900) leftDock.classList.add('collapsed');
-        else leftDock.classList.remove('collapsed');
-    }
-    adaptDock();
-    window.addEventListener('resize', adaptDock);
-})();
-
-const TOOLS = [
-    { id:'pull', em:'🔼', tip:'Pull out' },
-    { id:'push', em:'🔽', tip:'Push in' },
-    { id:'smooth', em:'🧈', tip:'Smooth' },
-    { id:'flatten', em:'🫓', tip:'Flatten' },
-    { id:'inflate', em:'🎈', tip:'Inflate' },
-    { id:'grab', em:'✊', tip:'Grab & move' },
-    { id:'crease', em:'✂️', tip:'Crease/sharp line' },
-    { id:'pinch', em:'🤏', tip:'Pinch vertices together' },
-];
-
-const toolButtonsById = new Map();
-
-function refreshToolButtonUi() {
-    for (const [id, btn] of toolButtonsById.entries()) {
-        btn.style.background = id === activeTool ? '#7b8b6f' : '#fff';
-        btn.style.color = id === activeTool ? '#fff' : '#2b332b';
+function removeAddShapePreview() {
+    if (addShapePreviewMesh) {
+        scene.remove(addShapePreviewMesh);
+        addShapePreviewMesh.geometry.dispose();
+        if (addShapePreviewWire) addShapePreviewWire.geometry.dispose();
+        addShapePreviewMesh = null;
+        addShapePreviewWire = null;
     }
 }
 
-function setActiveTool(nextTool) {
-    if (!TOOLS.some(t => t.id === nextTool)) return;
-    activeTool = nextTool;
-    refreshToolButtonUi();
+function updateAddShapePreview(worldPos, scale) {
+    if (!addShapePreviewMesh) return;
+    addShapePreviewMesh.position.copy(worldPos);
+    addShapePreviewMesh.scale.setScalar(scale);
+    // Apply user rotation on top of normal-alignment
+    const normalQ = new THREE.Quaternion();
+    normalQ.setFromUnitVectors(new THREE.Vector3(0, 1, 0), addShapeHitNormal.clone().normalize());
+    const userQ = new THREE.Quaternion().setFromEuler(addShapeRotation);
+    normalQ.multiply(userQ);
+    addShapePreviewMesh.quaternion.copy(normalQ);
+    addShapePreviewMesh.visible = true;
+    addShapeVisible = true;
 }
 
-const tbc = document.getElementById('tool-btns');
-for (const t of TOOLS) {
-    const b = document.createElement('button');
-    b.textContent = t.em; b.title = t.tip; b.dataset.tool = t.id;
-    b.style.cssText = 'padding:7px 10px;border:1.5px solid #7b8b6f;border-radius:10px;background:#fff;cursor:pointer;font-size:15px;transition:all 0.1s;box-shadow:0 4px 10px rgba(0,0,0,0.06);';
-    b.addEventListener('click', () => setActiveTool(t.id));
-    toolButtonsById.set(t.id, b);
-    tbc.appendChild(b);
+// Recompute preview position from stored surface hit point at current scale
+function recomputeAddShapePosition() {
+    if (!addShapeVisible || addShapeHitNormal.lengthSq() === 0) return;
+    const surfaceOffset = addShapeBaseRadius * addShapeScale * 0.35;
+    addShapePosition.copy(addShapeSurfaceHit).addScaledVector(addShapeHitNormal, surfaceOffset);
+    if (addShapePreviewMesh) {
+        addShapePreviewMesh.position.copy(addShapePosition);
+    }
 }
-refreshToolButtonUi();
 
-document.getElementById('br').addEventListener('input', e => { brushRadius=parseFloat(e.target.value); document.getElementById('brv').textContent=brushRadius.toFixed(2); });
-document.getElementById('sr').addEventListener('input', e => { sculptStrength=parseFloat(e.target.value); document.getElementById('srv').textContent=sculptStrength.toFixed(3); });
+function hideAddShapePreview() {
+    if (addShapePreviewMesh) addShapePreviewMesh.visible = false;
+    addShapeVisible = false;
+}
 
-const symBtn = document.getElementById('sym-btn');
-symBtn.addEventListener('click', () => { symmetryX=!symmetryX; symBtn.style.background=symmetryX?'#7b8b6f':'#fff'; symBtn.style.color=symmetryX?'#fff':'#2b332b'; });
-
-const formActionPanel = document.createElement('div');
-formActionPanel.style.cssText = 'margin-top:10px;padding-top:10px;border-top:1px dashed rgba(123,139,111,0.35);display:flex;flex-direction:column;gap:6px;';
-formActionPanel.innerHTML = `
-    <div style="font-weight:700;letter-spacing:0.08em;text-transform:uppercase;font-size:11px;color:#5a6652;">Form Ops</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-        <button id="dup-last-btn" style="padding:6px;border:1.5px solid #7b8b6f;border-radius:8px;background:#fff;cursor:pointer;font-size:11px;">⧉ Duplicate</button>
-        <button id="clear-patch-btn" style="padding:6px;border:1.5px solid #7b8b6f;border-radius:8px;background:#fff;cursor:pointer;font-size:11px;">◌ Clear</button>
-        <button id="extrude-lite-btn" style="padding:6px;border:1.5px solid #7b8b6f;border-radius:8px;background:#fff;cursor:pointer;font-size:11px;">⇧ Extrude</button>
-        <button id="bevel-lite-btn" style="padding:6px;border:1.5px solid #7b8b6f;border-radius:8px;background:#fff;cursor:pointer;font-size:11px;">⬓ Bevel</button>
-    </div>
-    <div id="selection-readout" style="font-size:11px;line-height:1.35;color:#5a6652;">Patch: none. Click or pinch a surface to select a region.</div>
-`;
-toolPanel.appendChild(formActionPanel);
-
-const duplicateLastBtn = document.getElementById('dup-last-btn');
-const clearPatchBtn = document.getElementById('clear-patch-btn');
-const extrudeLiteBtn = document.getElementById('extrude-lite-btn');
-const bevelLiteBtn = document.getElementById('bevel-lite-btn');
-const selectionReadout = document.getElementById('selection-readout');
-
-duplicateLastBtn.addEventListener('click', () => {
-    if (!beginDuplicatePlacement()) setCommandStatus('Duplicate Last needs a placed shape first');
-});
-clearPatchBtn.addEventListener('click', () => {
-    SelectionController.clear();
-    if (selectionReadout) selectionReadout.textContent = 'Patch: none. Click or pinch a surface to select a region.';
-    setCommandStatus('Selection cleared');
-});
-extrudeLiteBtn.addEventListener('click', () => {
-    if (!gestureSelection.active) {
-        setCommandStatus('Select a patch before extruding');
-        return;
+function enterAddShapeMode(shapeName) {
+    addShapeMode = true;
+    addShapeType = shapeName || 'sphere';
+    addShapeBaseHandScale = null;
+    addShapeRotation.set(0, 0, 0);
+    createAddShapePreview(addShapeType);
+    // Normalize default scale: target ~0.3 units radius regardless of shape
+    addShapeScale = addShapeBaseRadius > 0.01 ? 0.3 / addShapeBaseRadius : 0.5;
+    // Show preview at center immediately so it's visible
+    addShapePosition.set(0, 0, 0);
+    addShapeHitNormal.set(0, 0, 1);
+    addShapeSurfaceHit.set(0, 0, 0);
+    addShapeVisible = true;
+    if (addShapePreviewMesh) {
+        addShapePreviewMesh.position.set(0, 0, 0);
+        addShapePreviewMesh.visible = true;
     }
-    OperationController.nudge('extrude-lite', 0.08);
-});
-bevelLiteBtn.addEventListener('click', () => {
-    if (!gestureSelection.active) {
-        setCommandStatus('Select a patch before beveling');
-        return;
-    }
-    OperationController.nudge('bevel-lite', 0.06);
-});
+    setCommandStatus(`Add Shape: ${SHAPE_LABELS[addShapeType] || addShapeType} — hover to position, click to place`);
+    const addBtn = document.getElementById('add-shape-btn');
+    if (addBtn) addBtn.classList.add('active');
+}
 
-// Undo — full snapshot of geometry + material + transform so any action can be reversed
+function exitAddShapeMode() {
+    addShapeMode = false;
+    addShapeBaseHandScale = null;
+    gestureState._smoothSpan = null;
+    removeAddShapePreview();
+    setCommandStatus('Ready');
+    const addBtn = document.getElementById('add-shape-btn');
+    if (addBtn) addBtn.classList.remove('active');
+    const picker = document.getElementById('add-shape-picker');
+    if (picker) picker.style.display = 'none';
+}
+
+function confirmAddShape() {
+    if (!addShapeMode || !addShapeVisible) return;
+    // Add as separate scene object instead of merging
+    const entry = addSceneObject(addShapeType, addShapePosition, addShapeScale,
+        addShapePreviewMesh ? addShapePreviewMesh.rotation : null);
+    selectObject(entry);
+    setCommandStatus(`Placed ${SHAPE_LABELS[addShapeType] || addShapeType}! Drag to move.`);
+    exitAddShapeMode();
+}
+
+// ============================================================
+// 2d. DUPLICATE — click on mesh to pick up region, drag to place copy
+// ============================================================
+let dupMode = false;
+let dupPreviewMesh = null;
+let dupGeometry = null;
+let dupHitNormal = new THREE.Vector3();
+let dupPosition = new THREE.Vector3();
+let dupRadius = 0.5;
+
+function startDuplicate(hitPoint, hitNormal) {
+    const p = mesh.geometry.attributes.position;
+    const invMatrix = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+    const localHit = hitPoint.clone().applyMatrix4(invMatrix);
+    const r2 = dupRadius * dupRadius;
+    const verts = [];
+    for (let i = 0; i < p.count; i += 3) {
+        let inRange = false;
+        for (let v = 0; v < 3; v++) {
+            const dx = p.getX(i+v) - localHit.x, dy = p.getY(i+v) - localHit.y, dz = p.getZ(i+v) - localHit.z;
+            if (dx*dx + dy*dy + dz*dz < r2) { inRange = true; break; }
+        }
+        if (inRange) {
+            for (let v = 0; v < 3; v++) verts.push(p.getX(i+v) - localHit.x, p.getY(i+v) - localHit.y, p.getZ(i+v) - localHit.z);
+        }
+    }
+    if (verts.length < 9) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    geo.computeVertexNormals();
+    dupGeometry = geo;
+    if (dupPreviewMesh) { scene.remove(dupPreviewMesh); dupPreviewMesh.geometry.dispose(); }
+    dupPreviewMesh = new THREE.Mesh(geo, addShapePreviewMat);
+    dupPreviewMesh.renderOrder = 500;
+    scene.add(dupPreviewMesh);
+    dupHitNormal.copy(hitNormal);
+    dupPosition.copy(hitPoint);
+    dupPreviewMesh.position.copy(hitPoint);
+    dupMode = true;
+    setCommandStatus('Drag to place duplicate — release to set');
+}
+
+function updateDuplicate(screenX, screenY) {
+    if (!dupMode || !dupPreviewMesh) return;
+    const ndc = new THREE.Vector2((screenX / innerWidth) * 2 - 1, -(screenY / innerHeight) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hits = raycaster.intersectObjects([mesh]);
+    if (hits.length) {
+        const hitNorm = hits[0].face?.normal ? hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize() : new THREE.Vector3(0,0,1);
+        dupPosition.copy(hits[0].point).addScaledVector(hitNorm, 0.05);
+    } else {
+        const dir = new THREE.Vector3(); raycaster.ray.direction.normalize();
+        dir.copy(raycaster.ray.direction).multiplyScalar(4);
+        dupPosition.copy(raycaster.ray.origin).add(dir);
+    }
+    dupPreviewMesh.position.copy(dupPosition);
+}
+
+function confirmDuplicate() {
+    if (!dupMode || !dupPreviewMesh || !dupGeometry) return;
+    saveUndo();
+    const invMatrix = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+    const localPos = dupPosition.clone().applyMatrix4(invMatrix);
+    const srcPos = dupGeometry.attributes.position;
+    const newVerts = new Float32Array(srcPos.count * 3);
+    for (let i = 0; i < srcPos.count; i++) {
+        newVerts[i*3] = srcPos.getX(i) + localPos.x;
+        newVerts[i*3+1] = srcPos.getY(i) + localPos.y;
+        newVerts[i*3+2] = srcPos.getZ(i) + localPos.z;
+    }
+    const eg = mesh.geometry;
+    const prevCount = eg.attributes.position.count;
+    const addCount = newVerts.length / 3;
+    const mp = new Float32Array(prevCount * 3 + newVerts.length);
+    mp.set(eg.attributes.position.array, 0);
+    mp.set(newVerts, prevCount * 3);
+    const mg = new THREE.BufferGeometry();
+    mg.setAttribute('position', new THREE.BufferAttribute(mp, 3));
+    safeComputeNormals();
+    mesh.geometry.dispose();
+    mesh.geometry = mg;
+    safeComputeNormals();
+    refreshWireframe();
+    lastAddedRange = { start: prevCount, count: addCount };
+    setCommandStatus('Duplicate placed!');
+    cancelDuplicate();
+}
+
+function cancelDuplicate() {
+    dupMode = false;
+    if (dupPreviewMesh) { scene.remove(dupPreviewMesh); dupPreviewMesh.geometry.dispose(); dupPreviewMesh = null; }
+    if (dupGeometry) { dupGeometry.dispose(); dupGeometry = null; }
+}
+
+// Start with empty canvas — just create an invisible container mesh
+const emptyGeo = new THREE.BufferGeometry();
+emptyGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+mesh = new THREE.Mesh(emptyGeo, material);
+scene.add(mesh);
+
+// ============================================================
+// 3. UNDO SYSTEM
+// ============================================================
 const undoStack = [];
 function snapshot() {
     const pos = mesh.geometry.attributes.position;
@@ -999,61 +1201,703 @@ function snapshot() {
     return {
         positions: new Float32Array(pos.array),
         normals: norm ? new Float32Array(norm.array) : null,
-        material: {
-            color: material.color.getHex(),
-            metalness: material.metalness,
-            roughness: material.roughness,
-            opacity: material.opacity,
-            transparent: material.transparent,
-            wireframe: material.wireframe,
-        },
+        color: material.color.getHex(),
         scale: mesh.scale.toArray(),
         position: mesh.position.toArray(),
         rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+        // Save scene objects state
+        sceneObjectStates: sceneObjects.map(o => ({
+            name: o.name,
+            position: o.mesh.position.toArray(),
+            rotation: [o.mesh.rotation.x, o.mesh.rotation.y, o.mesh.rotation.z],
+            quaternion: o.mesh.quaternion.toArray(),
+            scale: o.mesh.scale.toArray(),
+        })),
+        // Save camera state
+        cameraPos: camera.position.toArray(),
+        cameraQuat: camera.quaternion.toArray(),
+        orbitTargetArr: orbitTarget.toArray(),
     };
 }
 function saveUndo() {
     undoStack.push(snapshot());
-    if (undoStack.length > 20) undoStack.shift();
+    if (undoStack.length > 30) undoStack.shift();
 }
 function undo() {
-    if (!undoStack.length) return;
+    if (!undoStack.length) {
+        setCommandStatus('Nothing to undo');
+        return;
+    }
     const s = undoStack.pop();
-    // Replace geometry buffers — handles shape changes, splits, adds (different vertex counts)
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(s.positions, 3));
     if (s.normals) g.setAttribute('normal', new THREE.BufferAttribute(s.normals, 3));
     mesh.geometry.dispose();
     mesh.geometry = g;
-    mesh.geometry.computeVertexNormals();
+    safeComputeNormals();
     refreshWireframe();
-    rebuildTopologyCache();
-    // Restore material
-    material.color.setHex(s.material.color);
-    material.metalness = s.material.metalness;
-    material.roughness = s.material.roughness;
-    material.opacity = s.material.opacity;
-    material.transparent = s.material.transparent;
-    material.wireframe = s.material.wireframe;
+    material.color.setHex(s.color);
+    if (!g.attributes.color) {
+        material.vertexColors = false;
+    }
     material.needsUpdate = true;
-    // Restore transform
     mesh.scale.fromArray(s.scale);
     mesh.position.fromArray(s.position);
     mesh.rotation.set(s.rotation[0], s.rotation[1], s.rotation[2]);
-    SelectionController.refreshFromGeometry();
-}
-document.getElementById('undo-btn').addEventListener('click', undo);
-window.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-        // Don't hijack native text undo when typing in chat input
-        if (e.target.closest('input, textarea')) return;
-        e.preventDefault();
-        undo();
+    // Restore scene objects state
+    if (s.sceneObjectStates) {
+        for (let i = 0; i < s.sceneObjectStates.length && i < sceneObjects.length; i++) {
+            const st = s.sceneObjectStates[i];
+            const o = sceneObjects[i];
+            o.mesh.position.fromArray(st.position);
+            o.mesh.quaternion.fromArray(st.quaternion);
+            o.mesh.scale.fromArray(st.scale);
+        }
+        updateSelectedOutline();
     }
+    // Restore camera state
+    if (s.cameraPos) {
+        camera.position.fromArray(s.cameraPos);
+        camera.quaternion.fromArray(s.cameraQuat);
+        orbitTarget.fromArray(s.orbitTargetArr);
+        camera.lookAt(orbitTarget);
+    }
+    // Re-apply abstract gradient + update rest positions if in abstract mode
+    if (currentAppMode === 'abstract') {
+        applyBlobGradient();
+        if (abstractRestPositions) {
+            abstractRestPositions = new Float32Array(mesh.geometry.attributes.position.array);
+        }
+    }
+    setCommandStatus(`Undone (${undoStack.length} left)`);
+}
+
+// ============================================================
+// 4. SCULPT / MODELING TOOLS
+// ============================================================
+let brushRadius = 0.6;
+let sculptStrength = 0.04;
+const _v = new THREE.Vector3(), _lp = new THREE.Vector3(), _ln = new THREE.Vector3(), _n = new THREE.Vector3();
+const _moldRight = new THREE.Vector3(), _moldUp = new THREE.Vector3(), _moldLocalD = new THREE.Vector3();
+const _invMatrix = new THREE.Matrix4();
+let MAX_VERTEX_DISPLACEMENT = 0.15;
+
+// --- Face highlight system ---
+let highlightMesh = null;
+const highlightMat = new THREE.MeshBasicMaterial({
+    color: 0xffdd57, transparent: true, opacity: 0.25,
+    side: THREE.DoubleSide, depthWrite: false, depthTest: true,
 });
+let lastHighlightPoint = null;
+let lastHighlightNormal = null;
+
+function highlightFacesAt(point, normal) {
+    if (!mesh) return;
+    lastHighlightPoint = point.clone();
+    lastHighlightNormal = normal.clone();
+    const p = mesh.geometry.attributes.position;
+    _invMatrix.copy(mesh.matrixWorld).invert();
+    _lp.copy(point).applyMatrix4(_invMatrix);
+    const r2 = brushRadius * brushRadius;
+
+    // Collect triangles within brush radius
+    const verts = [];
+    for (let i = 0; i < p.count; i += 3) {
+        // Check if any vertex of this triangle is within radius
+        let inRange = false;
+        for (let v = 0; v < 3; v++) {
+            _v.fromBufferAttribute(p, i + v);
+            const dx = _v.x - _lp.x, dy = _v.y - _lp.y, dz = _v.z - _lp.z;
+            if (dx*dx + dy*dy + dz*dz < r2) { inRange = true; break; }
+        }
+        if (inRange) {
+            for (let v = 0; v < 3; v++) {
+                _v.fromBufferAttribute(p, i + v);
+                verts.push(_v.x, _v.y, _v.z);
+            }
+        }
+    }
+
+    if (verts.length === 0) {
+        if (highlightMesh) highlightMesh.visible = false;
+        return;
+    }
+
+    // Build or update highlight mesh
+    const arr = new Float32Array(verts);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    geo.computeVertexNormals();
+
+    if (highlightMesh) {
+        highlightMesh.geometry.dispose();
+        highlightMesh.geometry = geo;
+    } else {
+        highlightMesh = new THREE.Mesh(geo, highlightMat);
+        highlightMesh.renderOrder = 900;
+    }
+    // Match the mesh transform
+    highlightMesh.position.copy(mesh.position);
+    highlightMesh.rotation.copy(mesh.rotation);
+    highlightMesh.scale.copy(mesh.scale);
+    highlightMesh.visible = true;
+    if (!highlightMesh.parent) scene.add(highlightMesh);
+}
+
+function hideHighlight() {
+    if (highlightMesh) highlightMesh.visible = false;
+    lastHighlightPoint = null;
+    lastHighlightNormal = null;
+} // increased for clay-like sculpting
+
+function getHitNormal(hit) {
+    return hit?.face?.normal ? hit.face.normal.clone() : new THREE.Vector3(0, 0, 1);
+}
+
+// Safely recompute normals without losing vertex colors
+function safeComputeNormals() {
+    mesh.geometry.computeVertexNormals();
+    // If material expects vertex colors but geometry has none → turn off to prevent black
+    if (material.vertexColors && !mesh.geometry.attributes.color) {
+        material.vertexColors = false;
+        material.needsUpdate = true;
+    }
+}
+
+function extrudeAt(point, normal, strength) {
+    const p = mesh.geometry.attributes.position;
+    _invMatrix.copy(mesh.matrixWorld).invert();
+    _lp.copy(point).applyMatrix4(_invMatrix);
+    _ln.copy(normal).transformDirection(_invMatrix).normalize();
+    const r2 = brushRadius * brushRadius;
+    let mod = false;
+    const clamped = Math.max(-MAX_VERTEX_DISPLACEMENT, Math.min(MAX_VERTEX_DISPLACEMENT, strength));
+    for (let i = 0; i < p.count; i++) {
+        _v.fromBufferAttribute(p, i);
+        const dx = _v.x - _lp.x, dy = _v.y - _lp.y, dz = _v.z - _lp.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < r2) {
+            const f = 0.5 * (1 + Math.cos(Math.PI * Math.sqrt(d2) / brushRadius));
+            p.setXYZ(i, _v.x + _ln.x * clamped * f, _v.y + _ln.y * clamped * f, _v.z + _ln.z * clamped * f);
+            mod = true;
+        }
+    }
+    if (mod) { p.needsUpdate = true; safeComputeNormals(); }
+}
+
+function smoothAt(point) {
+    const p = mesh.geometry.attributes.position;
+    _invMatrix.copy(mesh.matrixWorld).invert();
+    _lp.copy(point).applyMatrix4(_invMatrix);
+    const r2 = brushRadius * brushRadius;
+    const aff = [];
+    for (let i = 0; i < p.count; i++) {
+        _v.fromBufferAttribute(p, i);
+        const dx = _v.x - _lp.x, dy = _v.y - _lp.y, dz = _v.z - _lp.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < r2) aff.push({ i, x: _v.x, y: _v.y, z: _v.z, d: Math.sqrt(d2) });
+    }
+    if (aff.length < 2) return;
+    let ax = 0, ay = 0, az = 0;
+    for (const a of aff) { ax += a.x; ay += a.y; az += a.z; }
+    ax /= aff.length; ay /= aff.length; az /= aff.length;
+    for (const a of aff) {
+        const f = 0.4 * (0.5 * (1 + Math.cos(Math.PI * a.d / brushRadius)));
+        p.setXYZ(a.i, a.x + (ax - a.x) * f, a.y + (ay - a.y) * f, a.z + (az - a.z) * f);
+    }
+    p.needsUpdate = true;
+    safeComputeNormals();
+}
+
+// Smooth entire mesh — fixes edges, cleans up sharp transitions
+function smoothAllEdges(passes = 3) {
+    saveUndo();
+    const p = mesh.geometry.attributes.position;
+    const count = p.count;
+
+    for (let pass = 0; pass < passes; pass++) {
+        // For each triangle, average each vertex with its neighbors
+        for (let i = 0; i < count; i += 3) {
+            const ax = p.getX(i), ay = p.getY(i), az = p.getZ(i);
+            const bx = p.getX(i+1), by = p.getY(i+1), bz = p.getZ(i+1);
+            const cx = p.getX(i+2), cy = p.getY(i+2), cz = p.getZ(i+2);
+            const mx = (ax+bx+cx)/3, my = (ay+by+cy)/3, mz = (az+bz+cz)/3;
+            const blend = 0.25;
+            p.setXYZ(i,   ax + (mx-ax)*blend, ay + (my-ay)*blend, az + (mz-az)*blend);
+            p.setXYZ(i+1, bx + (mx-bx)*blend, by + (my-by)*blend, bz + (mz-bz)*blend);
+            p.setXYZ(i+2, cx + (mx-cx)*blend, cy + (my-cy)*blend, cz + (mz-cz)*blend);
+        }
+    }
+
+    p.needsUpdate = true;
+    safeComputeNormals();
+    refreshWireframe();
+    setCommandStatus(`Smoothed edges (${passes} passes)! ✨`);
+}
+
+function bevelAt(point, normal, strength) {
+    // Soft curved bevel: gentle extrude with wide falloff + multiple smooth passes
+    softSculptAt(point, normal, strength);
+}
+
+// Soft cloth-like sculpt: wide area, tiny displacement, heavy smoothing
+// Produces fluid, fabric-like deformations
+function softSculptAt(point, normal, strength) {
+    const p = mesh.geometry.attributes.position;
+    _invMatrix.copy(mesh.matrixWorld).invert();
+    _lp.copy(point).applyMatrix4(_invMatrix);
+    _ln.copy(normal).transformDirection(_invMatrix).normalize();
+
+    // Use wider radius than brush for softer falloff
+    const softRadius = brushRadius * 1.8;
+    const r2 = softRadius * softRadius;
+    // Very small displacement per frame — builds up with continuous drag
+    const disp = Math.max(-0.02, Math.min(0.02, strength));
+    let mod = false;
+
+    for (let i = 0; i < p.count; i++) {
+        _v.fromBufferAttribute(p, i);
+        const dx = _v.x - _lp.x, dy = _v.y - _lp.y, dz = _v.z - _lp.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < r2) {
+            const dist = Math.sqrt(d2) / softRadius;
+            // Very smooth quintic falloff — like pressing into soft fabric
+            const t = 1.0 - dist;
+            const f = t * t * t * (t * (t * 6 - 15) + 10); // smootherstep
+            p.setXYZ(i,
+                _v.x + _ln.x * disp * f,
+                _v.y + _ln.y * disp * f,
+                _v.z + _ln.z * disp * f
+            );
+            mod = true;
+        }
+    }
+    if (mod) {
+        p.needsUpdate = true;
+        // Multiple smooth passes — blends the displacement into surrounding area
+        for (let s = 0; s < 4; s++) smoothAt(point);
+        safeComputeNormals();
+    }
+}
+
+function moldAt(point, dx, dy) {
+    // Gentle grab — limited displacement for shape preservation
+    const p = mesh.geometry.attributes.position;
+    _invMatrix.copy(mesh.matrixWorld).invert();
+    _lp.copy(point).applyMatrix4(_invMatrix);
+    _moldRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+    _moldUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+    _moldLocalD.copy(_moldRight).multiplyScalar(dx * 0.002).add(_moldUp.multiplyScalar(-dy * 0.002));
+    _moldLocalD.transformDirection(_invMatrix);
+    // Clamp displacement
+    if (_moldLocalD.length() > MAX_VERTEX_DISPLACEMENT) _moldLocalD.setLength(MAX_VERTEX_DISPLACEMENT);
+    const r2 = brushRadius * brushRadius;
+    for (let i = 0; i < p.count; i++) {
+        _v.fromBufferAttribute(p, i);
+        const ddx = _v.x - _lp.x, ddy = _v.y - _lp.y, ddz = _v.z - _lp.z;
+        const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+        if (d2 < r2) {
+            const f = 0.5 * (1 + Math.cos(Math.PI * Math.sqrt(d2) / brushRadius));
+            p.setXYZ(i, _v.x + _moldLocalD.x * f, _v.y + _moldLocalD.y * f, _v.z + _moldLocalD.z * f);
+        }
+    }
+    p.needsUpdate = true;
+    safeComputeNormals();
+}
+
+// Mirror mesh across an axis
+function mirrorMesh(axis = 'x') {
+    // Auto-select first object if nothing selected
+    if (!selectedObject && sceneObjects.length > 0) selectObject(sceneObjects[0]);
+    const target = selectedObject ? selectedObject.mesh : mesh;
+    if (!target || !target.geometry) return;
+    const prevMesh = mesh;
+    mesh = target;
+    saveUndo();
+    const p = target.geometry.attributes.position;
+    const count = p.count;
+    // Duplicate all vertices mirrored
+    const newPos = new Float32Array(count * 6);
+    const newNorm = new Float32Array(count * 6);
+    const n = target.geometry.attributes.normal;
+    newPos.set(p.array, 0);
+    newNorm.set(n.array, 0);
+    for (let i = 0; i < count; i++) {
+        const idx = i * 3;
+        newPos[count * 3 + idx] = axis === 'x' ? -p.array[idx] : p.array[idx];
+        newPos[count * 3 + idx + 1] = axis === 'y' ? -p.array[idx + 1] : p.array[idx + 1];
+        newPos[count * 3 + idx + 2] = axis === 'z' ? -p.array[idx + 2] : p.array[idx + 2];
+        newNorm[count * 3 + idx] = axis === 'x' ? -n.array[idx] : n.array[idx];
+        newNorm[count * 3 + idx + 1] = axis === 'y' ? -n.array[idx + 1] : n.array[idx + 1];
+        newNorm[count * 3 + idx + 2] = axis === 'z' ? -n.array[idx + 2] : n.array[idx + 2];
+    }
+    const mg = new THREE.BufferGeometry();
+    mg.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+    mg.setAttribute('normal', new THREE.BufferAttribute(newNorm, 3));
+    target.geometry.dispose();
+    target.geometry = mg;
+    safeComputeNormals();
+    refreshWireframe();
+    mesh = prevMesh;
+    updateSelectedOutline();
+    setCommandStatus('Mirrored across ' + axis.toUpperCase());
+}
+
+// Array: duplicate N times along a direction
+function arrayMesh(count, direction) {
+    // Auto-select first object if nothing selected
+    if (!selectedObject && sceneObjects.length > 0) selectObject(sceneObjects[0]);
+    const target = selectedObject ? selectedObject.mesh : mesh;
+    if (!target || !target.geometry) return;
+    const prevMesh = mesh;
+    mesh = target;
+    saveUndo();
+    const p = target.geometry.attributes.position;
+    const srcCount = p.count;
+
+    const newVerts = [];
+    for (let c = 1; c <= count; c++) {
+        const offset = direction.clone().multiplyScalar(c * 2.0);
+        for (let i = 0; i < srcCount; i++) {
+            const si = i * 3;
+            newVerts.push(
+                p.array[si] + offset.x,
+                p.array[si + 1] + offset.y,
+                p.array[si + 2] + offset.z
+            );
+        }
+    }
+
+    const existArr = p.array;
+    const addArr = new Float32Array(newVerts);
+    const mp = new Float32Array(existArr.length + addArr.length);
+    mp.set(existArr, 0);
+    mp.set(addArr, existArr.length);
+
+    const mg = new THREE.BufferGeometry();
+    mg.setAttribute('position', new THREE.BufferAttribute(mp, 3));
+    target.geometry.dispose();
+    target.geometry = mg;
+    safeComputeNormals();
+    refreshWireframe();
+    mesh = prevMesh;
+    updateSelectedOutline();
+    setCommandStatus(`Arrayed ${count} copies`);
+}
+
+// Split mesh cleanly in half along an axis through the center.
+// Clips triangles that cross the split plane and caps the cut face.
+function splitMesh(splitPos = 0, axis = 'x') {
+    saveUndo();
+    const p = mesh.geometry.attributes.position;
+
+    // Find mesh center on the split axis for a true midpoint cut
+    let axMin = Infinity, axMax = -Infinity;
+    const ai = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+    for (let i = 0; i < p.count; i++) {
+        const v = ai === 0 ? p.getX(i) : ai === 1 ? p.getY(i) : p.getZ(i);
+        if (v < axMin) axMin = v;
+        if (v > axMax) axMax = v;
+    }
+    const splitAt = (axMin + axMax) / 2;
+
+    const getAxis = (idx) => ai === 0 ? p.getX(idx) : ai === 1 ? p.getY(idx) : p.getZ(idx);
+    const getVert = (idx) => new THREE.Vector3(p.getX(idx), p.getY(idx), p.getZ(idx));
+
+    // Interpolate vertex on the split plane between two vertices
+    function lerpToPlane(vA, vB) {
+        const aVal = ai === 0 ? vA.x : ai === 1 ? vA.y : vA.z;
+        const bVal = ai === 0 ? vB.x : ai === 1 ? vB.y : vB.z;
+        const t = (splitAt - aVal) / (bVal - aVal);
+        return new THREE.Vector3().lerpVectors(vA, vB, Math.max(0, Math.min(1, t)));
+    }
+
+    const newVerts = [];  // kept half triangles
+    const capVerts = [];  // vertices on the cut plane for capping
+
+    for (let i = 0; i < p.count; i += 3) {
+        const vA = getVert(i), vB = getVert(i + 1), vC = getVert(i + 2);
+        const aA = ai === 0 ? vA.x : ai === 1 ? vA.y : vA.z;
+        const aB = ai === 0 ? vB.x : ai === 1 ? vB.y : vB.z;
+        const aC = ai === 0 ? vC.x : ai === 1 ? vC.y : vC.z;
+        const sA = aA >= splitAt, sB = aB >= splitAt, sC = aC >= splitAt;
+        const keepCount = (sA ? 1 : 0) + (sB ? 1 : 0) + (sC ? 1 : 0);
+
+        if (keepCount === 3) {
+            // Entire triangle on kept side
+            newVerts.push(vA, vB, vC);
+        } else if (keepCount === 0) {
+            // Entire triangle on discarded side — skip
+        } else if (keepCount === 2) {
+            // Two verts on kept side — clip to produce 2 triangles
+            // Sort so the lone discarded vert is first
+            let lone, k1, k2;
+            if (!sA) { lone = vA; k1 = vB; k2 = vC; }
+            else if (!sB) { lone = vB; k1 = vA; k2 = vC; }
+            else { lone = vC; k1 = vA; k2 = vB; }
+
+            const i1 = lerpToPlane(lone, k1);
+            const i2 = lerpToPlane(lone, k2);
+
+            // Two triangles forming the clipped quad
+            newVerts.push(k1, k2, i1);
+            newVerts.push(i1, k2, i2);
+
+            // Cap edge
+            capVerts.push(i1, i2);
+        } else {
+            // One vert on kept side — clip to produce 1 triangle
+            let keep, d1, d2;
+            if (sA) { keep = vA; d1 = vB; d2 = vC; }
+            else if (sB) { keep = vB; d1 = vA; d2 = vC; }
+            else { keep = vC; d1 = vA; d2 = vB; }
+
+            const i1 = lerpToPlane(d1, keep);
+            const i2 = lerpToPlane(d2, keep);
+
+            newVerts.push(keep, i1, i2);
+
+            // Cap edge
+            capVerts.push(i1, i2);
+        }
+    }
+
+    // Build hollow bowl — no cap face.
+    // Instead, create an inner wall by duplicating the outer shell offset inward,
+    // then connect the rim edges to form a visible wall thickness.
+
+    const WALL_THICKNESS = 0.08;
+
+    // 1. Build the inner shell — offset each vertex inward toward mesh center
+    const innerVerts = [];
+    for (const v of newVerts) {
+        const dir = v.clone().normalize(); // direction from center
+        const inner = v.clone().sub(dir.multiplyScalar(WALL_THICKNESS));
+        innerVerts.push(inner);
+    }
+
+    // 2. Add inner shell with reversed winding (faces point inward)
+    const allVerts = [...newVerts]; // outer shell (faces outward)
+    for (let i = 0; i < innerVerts.length; i += 3) {
+        // Reverse winding: swap vertex 1 and 2
+        allVerts.push(innerVerts[i], innerVerts[i + 2], innerVerts[i + 1]);
+    }
+
+    // 3. Connect rim — bridge outer and inner cap edges to form the wall thickness
+    if (capVerts.length >= 2) {
+        // Collect rim edge pairs (outer → inner)
+        const center = new THREE.Vector3();
+        for (const v of capVerts) center.add(v);
+        center.divideScalar(capVerts.length);
+
+        // Tangent frame on the cut plane
+        const normal = new THREE.Vector3(ai === 0 ? 1 : 0, ai === 1 ? 1 : 0, ai === 2 ? 1 : 0);
+        const tangent1 = new THREE.Vector3(ai === 0 ? 0 : 1, ai === 1 ? 0 : (ai === 0 ? 1 : 0), ai === 2 ? 0 : (ai === 0 ? 0 : 1)).normalize();
+        const tangent2 = new THREE.Vector3().crossVectors(normal, tangent1).normalize();
+
+        // Deduplicate close vertices
+        const unique = [capVerts[0]];
+        for (let i = 1; i < capVerts.length; i++) {
+            let isDupe = false;
+            for (const u of unique) {
+                if (capVerts[i].distanceTo(u) < 0.001) { isDupe = true; break; }
+            }
+            if (!isDupe) unique.push(capVerts[i]);
+        }
+
+        if (unique.length >= 3) {
+            // Sort by angle to form ordered rim loop
+            unique.sort((a, b) => {
+                const da = a.clone().sub(center);
+                const db = b.clone().sub(center);
+                return Math.atan2(da.dot(tangent2), da.dot(tangent1)) -
+                       Math.atan2(db.dot(tangent2), db.dot(tangent1));
+            });
+
+            // For each rim edge, create a quad connecting outer to inner
+            for (let i = 0; i < unique.length; i++) {
+                const next = (i + 1) % unique.length;
+                const outerA = unique[i];
+                const outerB = unique[next];
+                const dirA = outerA.clone().normalize();
+                const dirB = outerB.clone().normalize();
+                const innerA = outerA.clone().sub(dirA.multiplyScalar(WALL_THICKNESS));
+                const innerB = outerB.clone().sub(dirB.multiplyScalar(WALL_THICKNESS));
+
+                // Two triangles forming the rim quad
+                allVerts.push(outerA, outerB, innerA);
+                allVerts.push(innerA, outerB, innerB);
+            }
+        }
+    }
+
+    if (allVerts.length < 3) return;
+
+    // Build new geometry
+    const posArr = new Float32Array(allVerts.length * 3);
+    for (let i = 0; i < allVerts.length; i++) {
+        posArr[i * 3] = allVerts[i].x;
+        posArr[i * 3 + 1] = allVerts[i].y;
+        posArr[i * 3 + 2] = allVerts[i].z;
+    }
+    const mg = new THREE.BufferGeometry();
+    mg.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    mg.computeVertexNormals();
+    mesh.geometry.dispose();
+    mesh.geometry = mg;
+    refreshWireframe();
+    setCommandStatus('Split — clean cut');
+}
+
+// Distance measurement
+let distancePoints = [];
+let distanceLines = [];
+function measureDistance(point) {
+    distancePoints.push(point.clone());
+    if (distancePoints.length === 2) {
+        const dist = distancePoints[0].distanceTo(distancePoints[1]);
+        setCommandStatus(`Distance: ${dist.toFixed(3)} units`);
+        // Draw line
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(distancePoints);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0xff0000 });
+        const line = new THREE.Line(lineGeo, lineMat);
+        scene.add(line);
+        distanceLines.push(line);
+        distancePoints = [];
+        setTimeout(() => {
+            distanceLines.forEach(l => { scene.remove(l); l.geometry.dispose(); l.material.dispose(); });
+            distanceLines = [];
+        }, 5000);
+    } else {
+        setCommandStatus('Click second point to measure distance');
+    }
+}
+
+// Merge shapes — fill gaps between disconnected parts of the mesh
+// Finds vertices near each other from different "islands" and bridges them
+// by pulling nearby vertices together and inflating the gap region
+function mergeShapes() {
+    saveUndo();
+    const p = mesh.geometry.attributes.position;
+    const count = p.count;
+
+    // 1. Find the mesh center of mass
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < count; i++) {
+        cx += p.getX(i); cy += p.getY(i); cz += p.getZ(i);
+    }
+    cx /= count; cy /= count; cz /= count;
+
+    // 2. For each vertex, find its nearest neighbor that's from a different triangle
+    //    and if the gap is small enough, pull them together
+    const mergeRadius = 0.6; // max distance to consider for merging
+    const pullStrength = 0.7; // how much to close the gap (0=none, 1=fully close)
+
+    // Build a simple spatial grid for faster neighbor lookup
+    const cellSize = mergeRadius;
+    const grid = new Map();
+    const key = (x, y, z) => `${Math.floor(x/cellSize)},${Math.floor(y/cellSize)},${Math.floor(z/cellSize)}`;
+
+    for (let i = 0; i < count; i++) {
+        const k = key(p.getX(i), p.getY(i), p.getZ(i));
+        if (!grid.has(k)) grid.set(k, []);
+        grid.get(k).push(i);
+    }
+
+    // 3. For each vertex, look at nearby cells for close vertices from different triangles
+    const moved = new Uint8Array(count); // track which vertices were adjusted
+    const triOf = (idx) => Math.floor(idx / 3); // which triangle a vertex belongs to
+
+    for (let i = 0; i < count; i++) {
+        const xi = p.getX(i), yi = p.getY(i), zi = p.getZ(i);
+        const ti = triOf(i);
+        let closestDist = mergeRadius;
+        let closestJ = -1;
+        let cjx = 0, cjy = 0, cjz = 0;
+
+        // Check neighboring cells
+        const gx = Math.floor(xi / cellSize), gy = Math.floor(yi / cellSize), gz = Math.floor(zi / cellSize);
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dz = -1; dz <= 1; dz++) {
+                    const cell = grid.get(`${gx+dx},${gy+dy},${gz+dz}`);
+                    if (!cell) continue;
+                    for (const j of cell) {
+                        if (triOf(j) === ti) continue; // same triangle, skip
+                        // Don't merge within adjacent triangles (shared edge)
+                        if (Math.abs(triOf(j) - ti) <= 1) continue;
+                        const xj = p.getX(j), yj = p.getY(j), zj = p.getZ(j);
+                        const dist = Math.sqrt((xi-xj)**2 + (yi-yj)**2 + (zi-zj)**2);
+                        if (dist < closestDist && dist > 0.001) {
+                            closestDist = dist;
+                            closestJ = j;
+                            cjx = xj; cjy = yj; cjz = zj;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (closestJ !== -1 && closestDist < mergeRadius) {
+            // Pull this vertex toward the closest vertex from another part
+            const t = pullStrength * (1.0 - closestDist / mergeRadius); // stronger pull when closer
+            const smooth = t * t; // ease-in for natural look
+            p.setXYZ(i,
+                xi + (cjx - xi) * smooth * 0.5,
+                yi + (cjy - yi) * smooth * 0.5,
+                zi + (cjz - zi) * smooth * 0.5
+            );
+            moved[i] = 1;
+        }
+    }
+
+    // 4. Smooth the merge zone — average moved vertices with their triangle neighbors
+    for (let i = 0; i < count; i += 3) {
+        if (moved[i] || moved[i+1] || moved[i+2]) {
+            const ax = p.getX(i), ay = p.getY(i), az = p.getZ(i);
+            const bx = p.getX(i+1), by = p.getY(i+1), bz = p.getZ(i+1);
+            const cx2 = p.getX(i+2), cy2 = p.getY(i+2), cz2 = p.getZ(i+2);
+            const mx = (ax+bx+cx2)/3, my = (ay+by+cy2)/3, mz = (az+bz+cz2)/3;
+            const blend = 0.15; // subtle smoothing
+            for (let v = 0; v < 3; v++) {
+                if (moved[i+v]) {
+                    p.setXYZ(i+v,
+                        p.getX(i+v) * (1-blend) + mx * blend,
+                        p.getY(i+v) * (1-blend) + my * blend,
+                        p.getZ(i+v) * (1-blend) + mz * blend
+                    );
+                }
+            }
+        }
+    }
+
+    p.needsUpdate = true;
+    safeComputeNormals();
+    refreshWireframe();
+
+    const movedCount = moved.reduce((a, b) => a + b, 0);
+    setCommandStatus(`Merged! ${movedCount} vertices bridged 🔗`);
+}
+
+// Check mesh integrity
+function checkMesh() {
+    const p = mesh.geometry.attributes.position;
+    const triCount = p.count / 3;
+    let issues = [];
+    if (p.count % 3 !== 0) issues.push('Non-triangulated faces');
+    // Check for NaN
+    for (let i = 0; i < p.array.length; i++) {
+        if (isNaN(p.array[i])) { issues.push('NaN vertex detected'); break; }
+    }
+    if (issues.length === 0) {
+        setCommandStatus(`✓ Mesh OK: ${triCount} triangles, ${p.count} vertices`);
+    } else {
+        setCommandStatus(`⚠ Issues: ${issues.join(', ')}`);
+    }
+}
 
 // STL Export
-document.getElementById('export-btn').addEventListener('click', () => {
+function exportSTL() {
     const pos = mesh.geometry.attributes.position;
     const triangles = pos.count / 3;
     const buf = new ArrayBuffer(84 + triangles * 50);
@@ -1063,2170 +1907,4961 @@ document.getElementById('export-btn').addEventListener('click', () => {
     const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3(), norm = new THREE.Vector3();
     for (let i = 0; i < triangles; i++) {
         const i3 = i * 3;
-        vA.fromBufferAttribute(pos, i3); vB.fromBufferAttribute(pos, i3+1); vC.fromBufferAttribute(pos, i3+2);
+        vA.fromBufferAttribute(pos, i3); vB.fromBufferAttribute(pos, i3 + 1); vC.fromBufferAttribute(pos, i3 + 2);
         vA.applyMatrix4(mesh.matrixWorld); vB.applyMatrix4(mesh.matrixWorld); vC.applyMatrix4(mesh.matrixWorld);
-        const edge1 = vB.clone().sub(vA), edge2 = vC.clone().sub(vA);
-        norm.crossVectors(edge1, edge2).normalize();
-        dv.setFloat32(offset, norm.x, true); dv.setFloat32(offset+4, norm.y, true); dv.setFloat32(offset+8, norm.z, true); offset+=12;
-        dv.setFloat32(offset, vA.x, true); dv.setFloat32(offset+4, vA.y, true); dv.setFloat32(offset+8, vA.z, true); offset+=12;
-        dv.setFloat32(offset, vB.x, true); dv.setFloat32(offset+4, vB.y, true); dv.setFloat32(offset+8, vB.z, true); offset+=12;
-        dv.setFloat32(offset, vC.x, true); dv.setFloat32(offset+4, vC.y, true); dv.setFloat32(offset+8, vC.z, true); offset+=12;
-        dv.setUint16(offset, 0, true); offset+=2;
+        const e1 = vB.clone().sub(vA), e2 = vC.clone().sub(vA);
+        norm.crossVectors(e1, e2).normalize();
+        dv.setFloat32(offset, norm.x, true); dv.setFloat32(offset + 4, norm.y, true); dv.setFloat32(offset + 8, norm.z, true); offset += 12;
+        dv.setFloat32(offset, vA.x, true); dv.setFloat32(offset + 4, vA.y, true); dv.setFloat32(offset + 8, vA.z, true); offset += 12;
+        dv.setFloat32(offset, vB.x, true); dv.setFloat32(offset + 4, vB.y, true); dv.setFloat32(offset + 8, vB.z, true); offset += 12;
+        dv.setFloat32(offset, vC.x, true); dv.setFloat32(offset + 4, vC.y, true); dv.setFloat32(offset + 8, vC.z, true); offset += 12;
+        dv.setUint16(offset, 0, true); offset += 2;
     }
     const blob = new Blob([buf], { type: 'application/octet-stream' });
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'sculpture.stl'; a.click();
-});
-
-// Brush viz
-const brushVizGeo = new THREE.RingGeometry(0.95, 1, 48);
-const brushVizMat = new THREE.MeshBasicMaterial({ color: 0xffdd57, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthTest: false });
-const brushViz = new THREE.Mesh(brushVizGeo, brushVizMat);
-brushViz.visible = false; brushViz.renderOrder = 999;
-scene.add(brushViz);
-function showBrush(pt, nm) { brushViz.position.copy(pt); brushViz.scale.setScalar(brushRadius); if(nm){const t=pt.clone().add(nm);brushViz.lookAt(t);} brushViz.visible=true; }
-function hideBrush() { brushViz.visible = false; }
-
-// Gesture hover/select visuals (post-placement sculpt intent)
-const hoverVizMat = new THREE.MeshBasicMaterial({ color: 0xfff08a, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthTest: false, toneMapped: false });
-const hoverViz = new THREE.Mesh(new THREE.RingGeometry(0.90, 1.0, 48), hoverVizMat);
-hoverViz.visible = false;
-hoverViz.renderOrder = 1000;
-scene.add(hoverViz);
-
-const gestureSelectRings = [];
-const selectRingScales = [0.88, 1.12, 1.38, 1.68];
-for (let i = 0; i < selectRingScales.length; i++) {
-    const m = new THREE.MeshBasicMaterial({ color: 0xfff3a1, transparent: true, opacity: Math.max(0.12, 0.38 - i * 0.07), side: THREE.DoubleSide, depthTest: false, toneMapped: false });
-    const ring = new THREE.Mesh(new THREE.RingGeometry(0.90, 1.0, 48), m);
-    ring.visible = false;
-    ring.renderOrder = 1001 + i;
-    scene.add(ring);
-    gestureSelectRings.push(ring);
-}
-
-const gestureSelectionGlow = new THREE.Mesh(
-    new THREE.CircleGeometry(1.0, 48),
-    new THREE.MeshBasicMaterial({ color: 0xfff4b8, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthTest: false, toneMapped: false })
-);
-gestureSelectionGlow.visible = false;
-gestureSelectionGlow.renderOrder = 1000;
-scene.add(gestureSelectionGlow);
-
-const gestureSelection = selectionState;
-let pinchSelectLatch = false;
-let pinchSculptLastZ = null;
-let pinchSculptUndoArmed = false;
-
-function orientRingAt(ring, pt, nm, scale) {
-    ring.position.copy(pt);
-    ring.scale.setScalar(scale);
-    const look = pt.clone().add(nm);
-    ring.lookAt(look);
-    ring.visible = true;
-}
-
-function showGestureHover(ptLocal, nmLocal, radius) {
-    const worldPt = ptLocal.clone().applyMatrix4(mesh.matrixWorld);
-    const worldNormal = nmLocal.clone().transformDirection(mesh.matrixWorld).normalize();
-    orientRingAt(hoverViz, worldPt, worldNormal, radius);
-}
-
-function hideGestureHover() {
-    hoverViz.visible = false;
-}
-
-function updateGestureSelectionViz() {
-    if (!gestureSelection.active) {
-        gestureSelectRings.forEach(r => r.visible = false);
-        gestureSelectionGlow.visible = false;
-        if (selectionReadout) selectionReadout.textContent = 'Patch: none. Click or pinch a surface to select a region.';
-        return;
-    }
-    const worldPt = gestureSelection.pointLocal.clone().applyMatrix4(mesh.matrixWorld);
-    const worldNormal = gestureSelection.normalLocal.clone().transformDirection(mesh.matrixWorld).normalize();
-
-    gestureSelectionGlow.position.copy(worldPt);
-    const pulseActive = performance.now() < gestureSelection.pulseUntil;
-    const pulseScale = pulseActive ? 1.16 + Math.sin(performance.now() * 0.03) * 0.03 : 1.05;
-    gestureSelectionGlow.scale.setScalar(gestureSelection.radius * pulseScale);
-    gestureSelectionGlow.material.opacity = pulseActive ? 0.20 : 0.12;
-    gestureSelectionGlow.lookAt(worldPt.clone().add(worldNormal));
-    gestureSelectionGlow.visible = true;
-
-    for (let i = 0; i < gestureSelectRings.length; i++) {
-        orientRingAt(
-            gestureSelectRings[i],
-            worldPt,
-            worldNormal,
-            gestureSelection.radius * selectRingScales[i],
-        );
-    }
-    if (selectionReadout) {
-        selectionReadout.textContent = `Patch: ${gestureSelection.logicalVertexIds.size} verts · boundary ${gestureSelection.boundaryVertexIds.size} · ${interactionState.mode === 'detail' ? 'detail/bevel ready' : interactionState.mode === 'form' ? 'form/extrude ready' : 'mold ready'}`;
-    }
-}
-
-function clearGestureSelection() {
-    gestureSelection.active = false;
-    gestureSelection.kind = 'none';
-    gestureSelection.logicalVertexIds = new Set();
-    gestureSelection.boundaryVertexIds = new Set();
-    pinchSelectLatch = false;
-    pinchSculptLastZ = null;
-    pinchSculptUndoArmed = false;
-    gestureSelection.pulseUntil = 0;
-    hideGestureHover();
-    gestureSelectionGlow.visible = false;
-    gestureSelectRings.forEach(r => r.visible = false);
-    if (selectionReadout) selectionReadout.textContent = 'Patch: none. Click or pinch a surface to select a region.';
-}
-
-function logicalVertexFromHit(hit) {
-    if (!hit?.face) return null;
-    const faceIndices = [hit.face.a, hit.face.b, hit.face.c].filter(idx => idx !== undefined);
-    if (!faceIndices.length) return null;
-    let best = topologyCache.bufferToLogical[faceIndices[0]];
-    let bestDist = Infinity;
-    const p = mesh.geometry.attributes.position;
-    const v = new THREE.Vector3();
-    for (const idx of faceIndices) {
-        v.fromBufferAttribute(p, idx);
-        const d = v.distanceToSquared(hit.point.clone().applyMatrix4(mesh.matrixWorld.clone().invert()));
-        if (d < bestDist) {
-            bestDist = d;
-            best = topologyCache.bufferToLogical[idx];
-        }
-    }
-    return best ?? null;
-}
-
-const SelectionController = {
-    clear() {
-        clearGestureSelection();
-    },
-    selectHit(hit, radius = Math.max(0.34, Math.min(1.35, brushRadius * 1.8))) {
-        if (!hit) return;
-        const inv = mesh.matrixWorld.clone().invert();
-        const pointLocal = hit.point.clone().applyMatrix4(inv);
-        const normalLocal = getHitNormal(hit).transformDirection(inv).normalize();
-        const seedLogicalId = logicalVertexFromHit(hit);
-        const selected = new Set();
-        const queue = [];
-        if (seedLogicalId !== null) queue.push(seedLogicalId);
-        const radius2 = radius * radius * 1.2;
-        while (queue.length) {
-            const logicalId = queue.shift();
-            if (selected.has(logicalId)) continue;
-            const logical = topologyCache.logicalVertices[logicalId];
-            if (!logical) continue;
-            if (logical.position.distanceToSquared(pointLocal) > radius2) continue;
-            selected.add(logicalId);
-            for (const neighborId of topologyCache.adjacency[logicalId] || []) {
-                if (!selected.has(neighborId)) queue.push(neighborId);
-            }
-        }
-        if (!selected.size) return;
-        gestureSelection.active = true;
-        gestureSelection.kind = 'region';
-        gestureSelection.pointLocal.copy(pointLocal);
-        gestureSelection.normalLocal.copy(normalLocal);
-        gestureSelection.radius = radius;
-        gestureSelection.logicalVertexIds = selected;
-        gestureSelection.boundaryVertexIds = new Set();
-        gestureSelection.pulseUntil = performance.now() + 220;
-        refreshSelectionFromTopology();
-        updateGestureSelectionViz();
-    },
-    refreshFromGeometry() {
-        if (!gestureSelection.active) return;
-        refreshSelectionFromTopology();
-        updateGestureSelectionViz();
-    },
-};
-
-function selectGestureRegion(hit) {
-    SelectionController.selectHit(hit);
-}
-
-function syncSelectionAfterGeometryChange(refreshEdges = false) {
-    mesh.geometry.computeVertexNormals();
-    rebuildTopologyCache();
-    if (gestureSelection.active) SelectionController.refreshFromGeometry();
-    if (refreshEdges) refreshWireframe();
-}
-
-function snapScalar(value, step) {
-    if (!step) return value;
-    return Math.round(value / step) * step;
-}
-
-function signedDominantAxis(vec) {
-    const absX = Math.abs(vec.x);
-    const absY = Math.abs(vec.y);
-    const absZ = Math.abs(vec.z);
-    if (absX >= absY && absX >= absZ) return new THREE.Vector3(Math.sign(vec.x) || 1, 0, 0);
-    if (absY >= absX && absY >= absZ) return new THREE.Vector3(0, Math.sign(vec.y) || 1, 0);
-    return new THREE.Vector3(0, 0, Math.sign(vec.z) || 1);
-}
-
-function getSnappedSelectionNormal(mode = interactionState.mode) {
-    const base = gestureSelection.normalLocal.clone().normalize();
-    const snapped = signedDominantAxis(base);
-    const blend = mode === 'detail'
-        ? GESTURE_TUNING.detailNormalSnap
-        : mode === 'form'
-            ? GESTURE_TUNING.formNormalSnap
-            : GESTURE_TUNING.sculptNormalSnap;
-    return base.lerp(snapped, blend).normalize();
-}
-
-function getSelectionFrame(mode = interactionState.mode) {
-    const normal = getSnappedSelectionNormal(mode);
-    const cameraRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-    const tangentX = cameraRight.clone().sub(normal.clone().multiplyScalar(cameraRight.dot(normal)));
-    if (tangentX.lengthSq() < 1e-6) tangentX.copy(new THREE.Vector3(1, 0, 0).sub(normal.clone().multiplyScalar(normal.x)));
-    tangentX.normalize();
-    const tangentY = new THREE.Vector3().crossVectors(normal, tangentX).normalize();
-    return { normal, tangentX, tangentY };
-}
-
-function regularizeSelectedPatch({ planarStrength = 0.6, quantizeTangent = false, tangentStep = GESTURE_TUNING.dragStep, boundaryStrength = 0.4, mode = interactionState.mode } = {}) {
-    if (!gestureSelection.active || !gestureSelection.logicalVertexIds.size) return;
-    const p = mesh.geometry.attributes.position;
-    const { normal, tangentX, tangentY } = getSelectionFrame(mode);
-    let avgDepth = 0;
-    const ids = [...gestureSelection.logicalVertexIds];
-    for (const logicalId of ids) {
-        const logical = topologyCache.logicalVertices[logicalId];
-        if (!logical) continue;
-        avgDepth += logical.position.dot(normal);
-    }
-    avgDepth /= Math.max(ids.length, 1);
-
-    for (const logicalId of ids) {
-        const logical = topologyCache.logicalVertices[logicalId];
-        if (!logical) continue;
-        const offset = logical.position.clone().sub(gestureSelection.pointLocal);
-        const tx = offset.dot(tangentX);
-        const ty = offset.dot(tangentY);
-        const quantizedTx = quantizeTangent ? snapScalar(tx, tangentStep) : tx;
-        const quantizedTy = quantizeTangent ? snapScalar(ty, tangentStep) : ty;
-        const target = gestureSelection.pointLocal.clone()
-            .addScaledVector(tangentX, quantizedTx)
-            .addScaledVector(tangentY, quantizedTy)
-            .addScaledVector(normal, avgDepth - gestureSelection.pointLocal.dot(normal));
-        const strength = gestureSelection.boundaryVertexIds.has(logicalId) ? planarStrength * boundaryStrength : planarStrength;
-        setLogicalVertexPosition(logicalId, logical.position.clone().lerp(target, strength));
-    }
-    p.needsUpdate = true;
-}
-
-function normalizeOperationDelta(id, rawDelta) {
-    if (id === 'bevel-lite') {
-        if (Math.abs(rawDelta) < GESTURE_TUNING.bevelDepthDeadZone) return 0;
-        return snapScalar(THREE.MathUtils.clamp(rawDelta * GESTURE_TUNING.bevelDepthScale, -0.045, 0.045), GESTURE_TUNING.bevelDepthStep);
-    }
-    if (id === 'extrude-lite') {
-        if (Math.abs(rawDelta) < GESTURE_TUNING.formDepthDeadZone) return 0;
-        return snapScalar(THREE.MathUtils.clamp(rawDelta * GESTURE_TUNING.formDepthScale, -0.06, 0.06), GESTURE_TUNING.formDepthStep);
-    }
-    return rawDelta;
-}
-
-const OperationController = {
-    begin(id, meta = {}) {
-        if (!gestureSelection.active || !gestureSelection.logicalVertexIds.size) return false;
-        if (!interactionState.activeOperation || interactionState.activeOperation.id !== id) {
-            saveUndo();
-            interactionState.activeOperation = { id, lastValue: 0, meta };
-        }
-        return true;
-    },
-    update(nextValue) {
-        const op = interactionState.activeOperation;
-        if (!op) return;
-        const delta = normalizeOperationDelta(op.id, nextValue - op.lastValue);
-        if (Math.abs(delta) < 0.0005) return;
-        if (op.id === 'extrude-lite') extrudeSelectedPatch(delta);
-        if (op.id === 'bevel-lite') bevelSelectedPatch(delta);
-        op.lastValue += delta;
-        syncSelectionAfterGeometryChange(false);
-    },
-    commit() {
-        if (!interactionState.activeOperation) return;
-        syncSelectionAfterGeometryChange(true);
-        setCommandStatus(interactionState.activeOperation.id === 'bevel-lite' ? 'Selection beveled' : 'Selection extruded');
-        interactionState.activeOperation = null;
-    },
-    cancel() {
-        if (!interactionState.activeOperation) return;
-        undo();
-        interactionState.activeOperation = null;
-        SelectionController.refreshFromGeometry();
-    },
-    nudge(id, amount) {
-        if (!this.begin(id, { source: 'button' })) return;
-        this.update(amount);
-        this.commit();
-    },
-};
-
-function sculptSelectedRegion(pinchZ) {
-    if (!gestureSelection.active) return;
-    if (interactionState.mode === 'form' || interactionState.mode === 'detail') {
-        const opId = interactionState.mode === 'detail' ? 'bevel-lite' : 'extrude-lite';
-        if (!OperationController.begin(opId, { source: 'gesture' })) return;
-        if (pinchSculptLastZ !== null) {
-            const dz = pinchZ - pinchSculptLastZ;
-            const nextValue = interactionState.activeOperation.lastValue + dz * 2.1;
-            OperationController.update(nextValue);
-        }
-        pinchSculptLastZ = pinchZ;
-        return;
-    }
-    if (!pinchSculptUndoArmed) {
-        saveUndo();
-        pinchSculptUndoArmed = true;
-    }
-    if (pinchSculptLastZ !== null) {
-        const dz = pinchZ - pinchSculptLastZ;
-        if (Math.abs(dz) < GESTURE_TUNING.sculptDepthDeadZone) {
-            pinchSculptLastZ = pinchZ;
-            return;
-        }
-        const pushPull = snapScalar(Math.max(-0.045, Math.min(0.045, dz * GESTURE_TUNING.sculptDepthScale)), GESTURE_TUNING.sculptDepthStep);
-        if (Math.abs(pushPull) > 0.0008) {
-            extrudeSelectedPatch(pushPull * 0.55);
-            regularizeSelectedPatch({ planarStrength: 0.46, quantizeTangent: true, tangentStep: GESTURE_TUNING.dragStep, boundaryStrength: 0.55, mode: 'sculpt' });
-            syncSelectionAfterGeometryChange(false);
-        }
-    }
-    pinchSculptLastZ = pinchZ;
-}
-
-// Sculpt functions — reusable temps
-const _v = new THREE.Vector3(), _lp = new THREE.Vector3(), _ln = new THREE.Vector3(), _n = new THREE.Vector3();
-
-function getHitNormal(hit) {
-    if (hit?.face?.normal) return hit.face.normal.clone();
-    if (hit?.normal) return hit.normal.clone();
-    return new THREE.Vector3(0, 0, 1);
-}
-
-function sculptAt(point, normal, strength) {
-    const p = mesh.geometry.attributes.position;
-    const inv = mesh.matrixWorld.clone().invert();
-    _lp.copy(point).applyMatrix4(inv); _ln.copy(normal).transformDirection(inv).normalize();
-    const r2 = brushRadius*brushRadius; let mod=false;
-    for (let i=0;i<p.count;i++) {
-        _v.fromBufferAttribute(p,i);
-        const dx=_v.x-_lp.x, dy=_v.y-_lp.y, dz=_v.z-_lp.z, d2=dx*dx+dy*dy+dz*dz;
-        if (d2<r2) { const f=0.5*(1+Math.cos(Math.PI*Math.sqrt(d2)/brushRadius)); p.setXYZ(i,_v.x+_ln.x*strength*f,_v.y+_ln.y*strength*f,_v.z+_ln.z*strength*f); mod=true; }
-    }
-    if(mod){p.needsUpdate=true;mesh.geometry.computeVertexNormals();}
-}
-
-function smoothAt(point) {
-    const p=mesh.geometry.attributes.position;
-    const inv=mesh.matrixWorld.clone().invert();
-    _lp.copy(point).applyMatrix4(inv);
-    const r2=brushRadius*brushRadius, aff=[];
-    for(let i=0;i<p.count;i++){_v.fromBufferAttribute(p,i);const dx=_v.x-_lp.x,dy=_v.y-_lp.y,dz=_v.z-_lp.z,d2=dx*dx+dy*dy+dz*dz;if(d2<r2)aff.push({i,x:_v.x,y:_v.y,z:_v.z,d:Math.sqrt(d2)});}
-    if(aff.length<2)return;
-    let ax=0,ay=0,az=0;for(const a of aff){ax+=a.x;ay+=a.y;az+=a.z;}ax/=aff.length;ay/=aff.length;az/=aff.length;
-    for(const a of aff){const f=0.4*(0.5*(1+Math.cos(Math.PI*a.d/brushRadius)));p.setXYZ(a.i,a.x+(ax-a.x)*f,a.y+(ay-a.y)*f,a.z+(az-a.z)*f);}
-    p.needsUpdate=true;mesh.geometry.computeVertexNormals();
-}
-
-function flattenAt(point, normal) {
-    const p=mesh.geometry.attributes.position;
-    const inv=mesh.matrixWorld.clone().invert();
-    _lp.copy(point).applyMatrix4(inv);_ln.copy(normal).transformDirection(inv).normalize();
-    const r2=brushRadius*brushRadius;
-    for(let i=0;i<p.count;i++){_v.fromBufferAttribute(p,i);const dx=_v.x-_lp.x,dy=_v.y-_lp.y,dz=_v.z-_lp.z,d2=dx*dx+dy*dy+dz*dz;
-    if(d2<r2){const d=Math.sqrt(d2),f=0.5*(0.5*(1+Math.cos(Math.PI*d/brushRadius))),dot=dx*_ln.x+dy*_ln.y+dz*_ln.z;p.setXYZ(i,_v.x-_ln.x*dot*f,_v.y-_ln.y*dot*f,_v.z-_ln.z*dot*f);}}
-    p.needsUpdate=true;mesh.geometry.computeVertexNormals();
-}
-
-function inflateAt(point, strength) {
-    const p=mesh.geometry.attributes.position,nm=mesh.geometry.attributes.normal;
-    const inv=mesh.matrixWorld.clone().invert();
-    _lp.copy(point).applyMatrix4(inv);const r2=brushRadius*brushRadius;
-    for(let i=0;i<p.count;i++){_v.fromBufferAttribute(p,i);const dx=_v.x-_lp.x,dy=_v.y-_lp.y,dz=_v.z-_lp.z,d2=dx*dx+dy*dy+dz*dz;
-    if(d2<r2){_n.fromBufferAttribute(nm,i).normalize();const f=0.5*(1+Math.cos(Math.PI*Math.sqrt(d2)/brushRadius));p.setXYZ(i,_v.x+_n.x*strength*f,_v.y+_n.y*strength*f,_v.z+_n.z*strength*f);}}
-    p.needsUpdate=true;mesh.geometry.computeVertexNormals();
-}
-
-function grabAt(point, dx, dy) {
-    const p=mesh.geometry.attributes.position;
-    const inv=mesh.matrixWorld.clone().invert();
-    _lp.copy(point).applyMatrix4(inv);
-    // Convert screen delta to world delta
-    const cam = camera.position.clone();
-    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
-    const worldDx = right.multiplyScalar(dx * 0.003).add(up.multiplyScalar(-dy * 0.003));
-    const localDx = worldDx.transformDirection(inv);
-    const r2=brushRadius*brushRadius;
-    for(let i=0;i<p.count;i++){_v.fromBufferAttribute(p,i);const ddx=_v.x-_lp.x,ddy=_v.y-_lp.y,ddz=_v.z-_lp.z,d2=ddx*ddx+ddy*ddy+ddz*ddz;
-    if(d2<r2){const f=0.5*(1+Math.cos(Math.PI*Math.sqrt(d2)/brushRadius));p.setXYZ(i,_v.x+localDx.x*f,_v.y+localDx.y*f,_v.z+localDx.z*f);}}
-    p.needsUpdate=true;mesh.geometry.computeVertexNormals();
-}
-
-function creaseAt(point, normal, strength) {
-    // Moves vertices toward the stroke line (creates a sharp ridge/valley)
-    const p=mesh.geometry.attributes.position;
-    const inv=mesh.matrixWorld.clone().invert();
-    _lp.copy(point).applyMatrix4(inv);_ln.copy(normal).transformDirection(inv).normalize();
-    const r2=brushRadius*brushRadius;
-    for(let i=0;i<p.count;i++){_v.fromBufferAttribute(p,i);const dx=_v.x-_lp.x,dy=_v.y-_lp.y,dz=_v.z-_lp.z,d2=dx*dx+dy*dy+dz*dz;
-    if(d2<r2){const d=Math.sqrt(d2),f=0.5*(1+Math.cos(Math.PI*d/brushRadius));
-    // Pull toward center line + push along normal
-    const toCenter_x=_lp.x-_v.x,toCenter_y=_lp.y-_v.y,toCenter_z=_lp.z-_v.z;
-    const proj=toCenter_x*_ln.x+toCenter_y*_ln.y+toCenter_z*_ln.z;
-    const tangent_x=toCenter_x-_ln.x*proj,tangent_y=toCenter_y-_ln.y*proj,tangent_z=toCenter_z-_ln.z*proj;
-    p.setXYZ(i,_v.x+tangent_x*strength*f*0.5+_ln.x*strength*f,_v.y+tangent_y*strength*f*0.5+_ln.y*strength*f,_v.z+tangent_z*strength*f*0.5+_ln.z*strength*f);}}
-    p.needsUpdate=true;mesh.geometry.computeVertexNormals();
-}
-
-function pinchAt(point) {
-    // Pulls vertices toward the brush center
-    const p=mesh.geometry.attributes.position;
-    const inv=mesh.matrixWorld.clone().invert();
-    _lp.copy(point).applyMatrix4(inv);const r2=brushRadius*brushRadius;
-    for(let i=0;i<p.count;i++){_v.fromBufferAttribute(p,i);const dx=_v.x-_lp.x,dy=_v.y-_lp.y,dz=_v.z-_lp.z,d2=dx*dx+dy*dy+dz*dz;
-    if(d2<r2){const d=Math.sqrt(d2),f=sculptStrength*0.3*(0.5*(1+Math.cos(Math.PI*d/brushRadius)));
-    p.setXYZ(i,_v.x-dx*f,_v.y-dy*f,_v.z-dz*f);}}
-    p.needsUpdate=true;mesh.geometry.computeVertexNormals();
-}
-
-function applyTool(hit, dx, dy) {
-    const hitNormal = getHitNormal(hit);
-    switch(activeTool) {
-        case 'pull': sculptAt(hit.point, hitNormal, sculptStrength); break;
-        case 'push': sculptAt(hit.point, hitNormal, -sculptStrength); break;
-        case 'smooth': smoothAt(hit.point); break;
-        case 'flatten': flattenAt(hit.point, hitNormal); break;
-        case 'inflate': inflateAt(hit.point, sculptStrength); break;
-        case 'grab': grabAt(hit.point, dx||0, dy||0); break;
-        case 'crease': creaseAt(hit.point, hitNormal, sculptStrength); break;
-        case 'pinch': pinchAt(hit.point); break;
-    }
-    if (symmetryX) {
-        const inv=mesh.matrixWorld.clone().invert();
-        const lp=hit.point.clone().applyMatrix4(inv); lp.x=-lp.x;
-        const mp=lp.applyMatrix4(mesh.matrixWorld);
-        const mn=getHitNormal(hit); mn.x=-mn.x;
-        raycaster.set(mp.clone().addScaledVector(mn,0.5), mn.clone().negate());
-        const mh=raycaster.intersectObject(mesh);
-        if(mh.length) {
-            const m=mh[0];
-            const mNormal = getHitNormal(m);
-            switch(activeTool) {
-                case 'pull': sculptAt(m.point,mNormal,sculptStrength); break;
-                case 'push': sculptAt(m.point,mNormal,-sculptStrength); break;
-                case 'smooth': smoothAt(m.point); break;
-                case 'flatten': flattenAt(m.point,mNormal); break;
-                case 'inflate': inflateAt(m.point,sculptStrength); break;
-                case 'grab': grabAt(m.point,dx?-dx:0,dy||0); break;
-                case 'crease': creaseAt(m.point,mNormal,sculptStrength); break;
-                case 'pinch': pinchAt(m.point); break;
-            }
-        }
-    }
-}
-
-function applyToolToSelection(dx = 0, dy = 0) {
-    if (!gestureSelection.active) return false;
-    const worldPoint = gestureSelection.pointLocal.clone().applyMatrix4(mesh.matrixWorld);
-    const worldNormal = gestureSelection.normalLocal.clone().transformDirection(mesh.matrixWorld).normalize();
-    const oldR = brushRadius;
-    brushRadius = gestureSelection.radius;
-    switch (activeTool) {
-        case 'pull': sculptAt(worldPoint, worldNormal, sculptStrength); break;
-        case 'push': sculptAt(worldPoint, worldNormal, -sculptStrength); break;
-        case 'smooth': smoothAt(worldPoint); break;
-        case 'flatten': flattenAt(worldPoint, worldNormal); break;
-        case 'inflate': inflateAt(worldPoint, sculptStrength); break;
-        case 'grab': moveSelectedPatchByScreenDelta(dx, dy); break;
-        case 'crease': creaseAt(worldPoint, worldNormal, sculptStrength); break;
-        case 'pinch': pinchAt(worldPoint); break;
-        default:
-            brushRadius = oldR;
-            return false;
-    }
-    brushRadius = oldR;
-    syncSelectionAfterGeometryChange(false);
-    return true;
-}
-
-function setLogicalVertexPosition(logicalId, nextPosition) {
-    const p = mesh.geometry.attributes.position;
-    const logical = topologyCache.logicalVertices[logicalId];
-    if (!logical) return;
-    for (const bufferIndex of logical.bufferIndices) {
-        p.setXYZ(bufferIndex, nextPosition.x, nextPosition.y, nextPosition.z);
-    }
-}
-
-function getSelectionWeight(logicalId) {
-    const logical = topologyCache.logicalVertices[logicalId];
-    if (!logical) return 0;
-    const dist = logical.position.distanceTo(gestureSelection.pointLocal);
-    const radial = THREE.MathUtils.clamp(1 - dist / Math.max(gestureSelection.radius, 0.001), 0, 1);
-    let weight = 0.22 + radial * 0.78;
-    if (gestureSelection.boundaryVertexIds.has(logicalId)) weight *= 0.42;
-    return weight;
-}
-
-function softenSelectionBoundary(amount = 0.18) {
-    if (!gestureSelection.boundaryVertexIds.size) return;
-    const updates = [];
-    for (const logicalId of gestureSelection.boundaryVertexIds) {
-        const logical = topologyCache.logicalVertices[logicalId];
-        if (!logical) continue;
-        const neighbors = [...(topologyCache.adjacency[logicalId] || [])];
-        if (!neighbors.length) continue;
-        const avg = new THREE.Vector3();
-        let count = 0;
-        for (const neighborId of neighbors) {
-            const neighbor = topologyCache.logicalVertices[neighborId];
-            if (!neighbor) continue;
-            avg.add(neighbor.position);
-            count++;
-        }
-        if (!count) continue;
-        avg.multiplyScalar(1 / count);
-        updates.push([logicalId, logical.position.clone().lerp(avg, amount)]);
-    }
-    const p = mesh.geometry.attributes.position;
-    for (const [logicalId, nextPosition] of updates) {
-        setLogicalVertexPosition(logicalId, nextPosition);
-    }
-    p.needsUpdate = true;
-}
-
-function extrudeSelectedPatch(amount) {
-    const p = mesh.geometry.attributes.position;
-    const moveNormal = getSnappedSelectionNormal('form');
-    for (const logicalId of gestureSelection.logicalVertexIds) {
-        const logical = topologyCache.logicalVertices[logicalId];
-        if (!logical) continue;
-        const weight = gestureSelection.boundaryVertexIds.has(logicalId) ? 0.58 : 1.0;
-        const nextPosition = logical.position.clone().addScaledVector(moveNormal, amount * weight * 1.05);
-        setLogicalVertexPosition(logicalId, nextPosition);
-    }
-    p.needsUpdate = true;
-    regularizeSelectedPatch({ planarStrength: 0.84, quantizeTangent: true, tangentStep: GESTURE_TUNING.formDepthStep, boundaryStrength: 0.52, mode: 'form' });
-    softenSelectionBoundary(0.16);
-}
-
-function bevelSelectedPatch(amount) {
-    const p = mesh.geometry.attributes.position;
-    const center = gestureSelection.pointLocal.clone();
-    const { normal, tangentX, tangentY } = getSelectionFrame('detail');
-    for (const logicalId of gestureSelection.logicalVertexIds) {
-        const logical = topologyCache.logicalVertices[logicalId];
-        if (!logical) continue;
-        const weight = gestureSelection.boundaryVertexIds.has(logicalId) ? 0.62 : 1.0;
-        const offset = logical.position.clone().sub(center);
-        const tx = snapScalar(offset.dot(tangentX), GESTURE_TUNING.bevelDepthStep);
-        const ty = snapScalar(offset.dot(tangentY), GESTURE_TUNING.bevelDepthStep);
-        const tangent = tangentX.clone().multiplyScalar(tx).addScaledVector(tangentY, ty);
-        const tangentShrink = tangent.multiplyScalar(-amount * weight * 0.32);
-        const lift = normal.clone().multiplyScalar(amount * weight * 0.66);
-        const nextPosition = logical.position.clone().add(tangentShrink).add(lift);
-        setLogicalVertexPosition(logicalId, nextPosition);
-    }
-    p.needsUpdate = true;
-    regularizeSelectedPatch({ planarStrength: 0.9, quantizeTangent: true, tangentStep: GESTURE_TUNING.bevelDepthStep, boundaryStrength: 0.58, mode: 'detail' });
-    softenSelectionBoundary(0.26);
-}
-
-function moveSelectedPatchByScreenDelta(dx, dy) {
-    if (Math.abs(dx) < GESTURE_TUNING.dragPixelDeadZone && Math.abs(dy) < GESTURE_TUNING.dragPixelDeadZone) return;
-    const p = mesh.geometry.attributes.position;
-    const inv = mesh.matrixWorld.clone().invert();
-    const { tangentX, tangentY } = getSelectionFrame(interactionState.mode === 'detail' ? 'detail' : interactionState.mode === 'form' ? 'form' : 'sculpt');
-    let mx = dx * GESTURE_TUNING.dragScale;
-    let my = -dy * GESTURE_TUNING.dragScale;
-    if (Math.abs(mx) > Math.abs(my) * GESTURE_TUNING.axisBiasRatio) my = 0;
-    else if (Math.abs(my) > Math.abs(mx) * GESTURE_TUNING.axisBiasRatio) mx = 0;
-    mx = snapScalar(mx, GESTURE_TUNING.dragStep);
-    my = snapScalar(my, GESTURE_TUNING.dragStep);
-    const worldDelta = tangentX.clone().multiplyScalar(mx).addScaledVector(tangentY, my);
-    const localDelta = worldDelta.transformDirection(inv);
-    for (const logicalId of gestureSelection.logicalVertexIds) {
-        const logical = topologyCache.logicalVertices[logicalId];
-        if (!logical) continue;
-        const weight = gestureSelection.boundaryVertexIds.has(logicalId) ? 0.64 : 0.94;
-        const nextPosition = logical.position.clone().addScaledVector(localDelta, weight);
-        setLogicalVertexPosition(logicalId, nextPosition);
-    }
-    p.needsUpdate = true;
-    regularizeSelectedPatch({
-        planarStrength: interactionState.mode === 'sculpt' ? 0.42 : 0.68,
-        quantizeTangent: interactionState.mode !== 'sculpt',
-        tangentStep: GESTURE_TUNING.dragStep,
-        boundaryStrength: 0.54,
-        mode: interactionState.mode,
-    });
-    softenSelectionBoundary(0.12);
-}
-
-function beginDuplicatePlacement() {
-    if (!interactionState.lastAddSpec) return false;
-    setInteractionMode('add', 'ui');
-    startPlacement(interactionState.lastAddSpec.shape, interactionState.lastAddSpec);
-    setCommandStatus(`Duplicate ready: ${SHAPE_LABELS[interactionState.lastAddSpec.shape] || interactionState.lastAddSpec.shape}`);
-    return true;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'model.stl';
+    a.click();
+    URL.revokeObjectURL(a.href);
 }
 
 // ============================================================
-// 4. MEDIAPIPE
+// 5. APP MODE SYSTEM
 // ============================================================
-const video = document.getElementById('webcam');
-let handLandmarker, lastVideoTime = -1;
-const debugOverlay=document.getElementById('debug-overlay'), debugCanvas=document.getElementById('debug-canvas');
-const debugCtx=debugCanvas.getContext('2d'), debugText=document.getElementById('debug-gesture-text');
-const debugCommandText=document.getElementById('debug-command-text');
-const drawUtils=new DrawingUtils(debugCtx), debugBtn=document.getElementById('debug-toggle-btn');
-let isDebug=false;
-debugBtn.addEventListener('click',()=>{isDebug=!isDebug;debugBtn.textContent=isDebug?'🛠 Debug On':'🛠 Debug Off';debugBtn.classList.toggle('active',isDebug);debugOverlay.style.display=isDebug?'block':'none';if(isDebug){debugCanvas.width=innerWidth;debugCanvas.height=innerHeight;}else debugCtx.clearRect(0,0,debugCanvas.width,debugCanvas.height);});
-
-// Hand tracking on/off — useful when user is doing other things (scratching face, on phone, etc.)
-const handsBtn = document.getElementById('hands-toggle-btn');
-let handsEnabled = true;
-handsBtn.addEventListener('click', () => {
-    handsEnabled = !handsEnabled;
-    handsBtn.textContent = handsEnabled ? '✋ Hands On' : '✋ Hands Off';
-    handsBtn.classList.toggle('disabled', !handsEnabled);
-    handsBtn.classList.toggle('active', handsEnabled);
-    if (!handsEnabled) {
-        rotVX = 0; rotVY = 0;
-        last2HDist = null;
-        lastPalm = [null, null];
-        lastCuppedPos = [null,null];
-        resetGestureState();
-        debugText && (debugText.textContent = 'Hands disabled');
-    }
-});
-handsBtn.classList.add('active');
-
-async function initHands() {
-    const v=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
-    handLandmarker=await HandLandmarker.createFromOptions(v,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:"GPU"},runningMode:"VIDEO",numHands:2});
-    navigator.mediaDevices.getUserMedia({video:{width:640,height:480}}).then(s=>{video.srcObject=s;video.addEventListener("loadeddata",loop);}).catch(e=>console.error("Camera:",e));
-}
-
-window.addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();if(isDebug){debugCanvas.width=innerWidth;debugCanvas.height=innerHeight;}});
-
-// ============================================================
-// 5. GESTURES (hands = manipulation only)
-// ============================================================
-function isOpenPalm(lm){const w=lm[0],t=[8,12,16,20],p=[6,10,14,18];let e=0;for(let i=0;i<4;i++)if(Math.hypot(lm[t[i]].x-w.x,lm[t[i]].y-w.y)>Math.hypot(lm[p[i]].x-w.x,lm[p[i]].y-w.y)*1.15)e++;return e>=3&&Math.hypot(lm[4].x-lm[5].x,lm[4].y-lm[5].y)>0.06;}
-function isFist(lm){const w=lm[0],t=[8,12,16,20],p=[6,10,14,18];let c=0;for(let i=0;i<4;i++)if(Math.hypot(lm[t[i]].x-w.x,lm[t[i]].y-w.y)<Math.hypot(lm[p[i]].x-w.x,lm[p[i]].y-w.y))c++;return c>=4;}
-function isPinching(lm){return Math.hypot(lm[4].x-lm[8].x,lm[4].y-lm[8].y,lm[4].z-lm[8].z)<0.05&&Math.hypot(lm[3].x-lm[7].x,lm[3].y-lm[7].y,lm[3].z-lm[7].z)<0.12;}
-// C-shaped (cupped) hand: fingers curled inward forming a cup, thumb extended outward.
-// SUPER PERMISSIVE: anything that's not a flat open palm AND not a fist AND not a pinch.
-// This is meant to catch real hand-molding gestures in placement mode.
-function isCupped(lm) {
-    const w = lm[0];  // wrist
-    const t = [8, 12, 16, 20];  // finger tips
-    const p = [6, 10, 14, 18];  // finger MCPs (middle knuckles)
-
-    // Check if hand is NOT fully open (not all tips far from wrist)
-    let extendedCount = 0;
-    for (let i = 0; i < 4; i++) {
-        const tipDist = Math.hypot(lm[t[i]].x - w.x, lm[t[i]].y - w.y);
-        const mcpDist = Math.hypot(lm[p[i]].x - w.x, lm[p[i]].y - w.y);
-        // If tip is far from wrist (more than 1.5x the MCP distance), it's extended
-        if (tipDist > mcpDist * 1.5) extendedCount++;
-    }
-
-    // Thumb must be somewhat separated (not pinching against index)
-    const thumbIndexDist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y, lm[4].z - lm[8].z);
-    const notPinching = thumbIndexDist > 0.085;
-
-    // SUPER PERMISSIVE: if NOT all fingers extended AND not pinching → it's a cup
-    const isNotFullyOpen = extendedCount <= 1;
-
-    if(isDebug) console.log('isCupped check:', {extendedCount, notPinching, isNotFullyOpen, thumbIndexDist});
-
-    return isNotFullyOpen && notPinching;
-}
-
-// Dwell-time gesture confirmation — gesture must persist for N consecutive frames
-// before activating, and must be absent for M frames before releasing. This stops
-// passive hand motion (face scratching, phone, hand-on-head) from triggering moves.
-const CONFIRM_FRAMES = 5;   // ~5 video frames (~150ms at 30fps) of consistent gesture
-const RELEASE_FRAMES = 3;   // ~3 frames of inconsistency before deactivation
-const gestureState = [
-    { active: null, candidate: null, candidateCount: 0, releaseCount: 0 },
-    { active: null, candidate: null, candidateCount: 0, releaseCount: 0 },
-];
-function classifyHand(lm) {
-    // Hand must be reasonably positioned in frame center band — ignore hands at top
-    // of frame (often near face/hair) or bottom edge (often resting/off-screen).
-    const wristY = lm[0].y;
-    if (wristY < 0.05 || wristY > 0.95) return null;
-    if (isFist(lm))    return 'fist';
-    if (isPinching(lm)) return 'pinch';
-    if (isCupped(lm) && (placementShape || gestureSelection.active || interactionState.mode === 'sculpt' || interactionState.mode === 'form' || interactionState.mode === 'detail')) return 'cupped';
-    if (isOpenPalm(lm)) return 'palm';
-    return null; // ambiguous = no gesture
-}
-function stableGesture(hand, idx) {
-    const raw = classifyHand(hand);
-    const s = gestureState[idx];
-    if(isDebug && raw) console.log(`Hand ${idx} raw gesture:`, raw, 'active:', s.active, 'candidate:', s.candidate, 'candidateCount:', s.candidateCount);
-    if (raw && raw === s.active) {
-        s.candidate = null;
-        s.candidateCount = 0;
-        s.releaseCount = 0;
-        return s.active;
-    }
-    if (s.active && raw !== s.active) {
-        // Active gesture is no longer detected — count toward release.
-        s.releaseCount++;
-        // But also start considering the new (or null) candidate for next activation.
-        if (raw && raw === s.candidate) s.candidateCount++;
-        else { s.candidate = raw; s.candidateCount = raw ? 1 : 0; }
-        if (s.releaseCount >= RELEASE_FRAMES) {
-            s.active = null;
-            s.releaseCount = 0;
-        }
-        return s.active;
-    }
-    // No active gesture yet — must reach CONFIRM_FRAMES of the same candidate.
-    if (raw && raw === s.candidate) {
-        s.candidateCount++;
-        if(isDebug) console.log(`Hand ${idx} ${raw} candidate count: ${s.candidateCount}/${CONFIRM_FRAMES}`);
-        if (s.candidateCount >= CONFIRM_FRAMES) {
-            if(isDebug) console.log(`Hand ${idx} CONFIRMING gesture: ${raw}`);
-            s.active = s.candidate;
-            s.candidate = null;
-            s.candidateCount = 0;
-            s.releaseCount = 0;
-            return s.active;
-        }
-    } else {
-        s.candidate = raw;
-        s.candidateCount = raw ? 1 : 0;
-    }
-    return null;
-}
-function resetGestureState() {
-    gestureState.forEach(s => { s.active=null; s.candidate=null; s.candidateCount=0; s.releaseCount=0; });
-}
-
-function summarizeGestureCommand(gestures, handCount) {
-    if (placementShape && (gestures[0] === 'pinch' || gestures[0] === 'cupped')) return `Command: place ${placementShape} (grab & mold)`;
-    if (gestureSelection.active && handCount === 1 && gestures[0] === 'pinch') {
-        if (interactionState.mode === 'detail') return 'Command: bevel selected patch';
-        if (interactionState.mode === 'form') return 'Command: extrude selected patch';
-        return 'Command: mold selected patch';
-    }
-    if (handCount === 2) {
-        if (gestures[0] === 'fist' && gestures[1] === 'cupped') return 'Command: freeze + mold (single-side)';
-        if (gestures[0] === 'cupped' && gestures[1] === 'fist') return 'Command: freeze + mold (single-side)';
-        if (gestures[0] === 'cupped' && gestures[1] === 'cupped') return 'Command: dual-mold (symmetric)';
-        if (gestures[0] === 'pinch' && gestures[1] === 'pinch') return 'Command: split / move';
-        if (gestures[0] === 'palm' && gestures[1] === 'palm') return 'Command: scale';
-    }
-    if (handCount === 1) {
-        if (gestures[0] === 'cupped') return 'Command: grab & mold';
-        if (gestures[0] === 'pinch') return 'Command: move / translate';
-        if (gestures[0] === 'palm') return 'Command: rotate';
-        if (gestures[0] === 'fist') return 'Command: freeze';
-    }
-    return 'Command: idle';
-}
-
-const GestureInterpreter = {
-    translateDeadZone: 0.015,
-    scaleDeadZone: 0.005,
-    depthDeadZone: 0.006,
-    intentForHand(hand, gesture) {
-        if (!hand || !gesture) return null;
-        const thumb = hand[4];
-        const index = hand[8];
-        const wrist = hand[0];
-        const anchorNdc = new THREE.Vector2(
-            -((((thumb.x + index.x) * 0.5) * 2) - 1),
-            -((((thumb.y + index.y) * 0.5) * 2) - 1),
-        );
-        const spread = Math.hypot(thumb.x - index.x, thumb.y - index.y, thumb.z - index.z);
-        const depthDelta = (thumb.z + index.z) * 0.5 - wrist.z;
-        return { gesture, confidence: 1, handCount: 1, anchorNdc, spread, depthDelta };
-    },
-    filteredScaleDelta(previousDistance, nextDistance) {
-        const delta = previousDistance - nextDistance;
-        return Math.abs(delta) < this.scaleDeadZone ? 0 : delta;
-    },
-    filteredDepthDelta(delta) {
-        return Math.abs(delta) < this.depthDeadZone ? 0 : delta;
-    },
-};
-
-// ============================================================
-// 6. SPLIT SYSTEM — two pinches apart splits mesh in half
-// ============================================================
-let splitActive = false;
-let splitLeft = null, splitRight = null;
-let splitStartDist = 0, splitOriginX = 0;
-
-function splitMesh(handDist) {
-    const pos = mesh.geometry.attributes.position;
-    const norm = mesh.geometry.attributes.normal;
-    const inv = mesh.matrixWorld.clone().invert();
-
-    // Collect triangles into left (x<0) and right (x>=0) based on triangle centroid
-    const leftVerts = [], leftNorms = [], rightVerts = [], rightNorms = [];
-    for (let i = 0; i < pos.count; i += 3) {
-        const ax=pos.getX(i), ay=pos.getY(i), az=pos.getZ(i);
-        const bx=pos.getX(i+1), by=pos.getY(i+1), bz=pos.getZ(i+1);
-        const cx=pos.getX(i+2), cy=pos.getY(i+2), cz=pos.getZ(i+2);
-        const centX = (ax+bx+cx)/3;
-
-        const target = centX < 0 ? leftVerts : rightVerts;
-        const nTarget = centX < 0 ? leftNorms : rightNorms;
-        target.push(ax,ay,az, bx,by,bz, cx,cy,cz);
-        nTarget.push(norm.getX(i),norm.getY(i),norm.getZ(i),
-                     norm.getX(i+1),norm.getY(i+1),norm.getZ(i+1),
-                     norm.getX(i+2),norm.getY(i+2),norm.getZ(i+2));
-    }
-
-    // Hide original mesh
-    mesh.visible = false;
-
-    // Create two half meshes
-    function makeHalf(verts, norms) {
-        const g = new THREE.BufferGeometry();
-        g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
-        g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(norms), 3));
-        g.computeVertexNormals();
-        const m = new THREE.Mesh(g, material.clone());
-        m.position.copy(mesh.position);
-        m.rotation.copy(mesh.rotation);
-        m.scale.copy(mesh.scale);
-        scene.add(m);
-        return m;
-    }
-
-    splitLeft = makeHalf(leftVerts, leftNorms);
-    splitRight = makeHalf(rightVerts, rightNorms);
-    splitStartDist = handDist;
-    splitOriginX = mesh.position.x;
-    splitActive = true;
-
-    // Immediately offset halves so both are visible
-    splitLeft.position.x = splitOriginX - 0.8;
-    splitRight.position.x = splitOriginX + 0.8;
-}
-
-function finalizeSplit() {
-    if (!splitActive) return;
-    scene.remove(mesh);
-    mesh.geometry.dispose();
-
-    // Right half = active sculpting mesh (blue)
-    mesh = splitRight;
-    mesh.material = material;
-    refreshWireframe();
-    rebuildTopologyCache();
-    SelectionController.clear();
-
-    // Left half stays in scene as a grey ghost — clickable later
-    const leftMat = material.clone();
-    leftMat.color.setHex(0xd0d0d0);
-    leftMat.opacity = 0.6;
-    leftMat.transparent = true;
-    splitLeft.material = leftMat;
-
-    splitActive = false;
-    splitLeft = null;
-    splitRight = null;
-}
-
-// ============================================================
-// 7. RENDER LOOP — hands for rotate/scale/translate/split
-// ============================================================
-let lastPalm=[null,null], lastCuppedPos=[null,null], last2HDist=null, rotVX=0, rotVY=0;
-let lastFistZ=null;  // for blend-mode depth control via fist forward/back
-const _recenterTarget = new THREE.Vector3(0, 0, 0);
-
-function loop() {
-    requestAnimationFrame(loop);
-    let interacting=false, holding=false;
-    // Tracks whether the current frame's gestures are actively positioning/scaling
-    // the mesh. When false, the mesh drifts back to (0, 0, 0) so it stays centred
-    // on screen instead of stranded wherever the last translate left it.
-    let posActive = false;
-
-    if(handLandmarker && handsEnabled && video.currentTime!==lastVideoTime) {
-        lastVideoTime=video.currentTime;
-        const det=handLandmarker.detectForVideo(video,performance.now());
-
-        // Reset gesture state for hands no longer detected
-        if (det.landmarks.length < 2) gestureState[1] = { active: null, candidate: null, candidateCount: 0, releaseCount: 0 };
-        if (det.landmarks.length < 1) gestureState[0] = { active: null, candidate: null, candidateCount: 0, releaseCount: 0 };
-
-        // Debug
-        if(isDebug){debugCanvas.width=innerWidth;debugCanvas.height=innerHeight;debugCtx.clearRect(0,0,debugCanvas.width,debugCanvas.height);debugCtx.save();debugCtx.translate(debugCanvas.width,0);debugCtx.scale(-1,1);debugCtx.globalAlpha=0.35;debugCtx.drawImage(video,0,0,debugCanvas.width,debugCanvas.height);debugCtx.restore();debugCtx.globalAlpha=1;
-        if(det.landmarks.length){let lb='';const activeGestures=[];det.landmarks.forEach((h,i)=>{const m=h.map(l=>({...l,x:1-l.x}));drawUtils.drawConnectors(m,HandLandmarker.HAND_CONNECTIONS,{color:i?'#e66767':'#7b8b6f',lineWidth:3});drawUtils.drawLandmarks(m,{color:i?'#fffaec':'#f8eedb',fillColor:i?'#e66767':'#7b8b6f',radius:4});const g=gestureState[i].active;activeGestures.push(g);if(g==='fist')lb+='✊ Freeze  ';else if(g==='pinch')lb+='🤏 Move  ';else if(g==='cupped')lb+='🖐️ Grab  ';else if(g==='palm')lb+='🤚 Rotate  ';else lb+='⏳ idle  ';});debugText.textContent=lb.trim();debugCommandText.textContent=summarizeGestureCommand(activeGestures, det.landmarks.length);}else {debugText.textContent='No hands';debugCommandText.textContent='Command: idle';}}
-
-        if(det.landmarks.length) {
-            // Run stability classifier on each detected hand BEFORE branching
-            const gestures = det.landmarks.map((h, i) => stableGesture(h, i));
-            adaptModeFromGestures(gestures, det.landmarks.length);
-            const anyActive = gestures.some(g => g !== null);
-            let hoverHit = null;
-            if (anyActive) interacting = true;
-
-            // ============================================================
-            // GESTURE-DRIVEN SHAPE PLACEMENT
-            // When `placementShape` is set (user clicked ➕):
-            // - PINCH: thumb-index pinch for precise placement
-            // - CUPPED: C-shaped grab for intuitive molding (spread of all fingers → size)
-            //   • finger spread (hand opening within cup) → size
-            //   • hand z (forward/back) relative to start → depth
-            //   • release gesture → instant commit
-            // While placing, all other gestures are suppressed.
-            // ============================================================
-            if (interactionMode === 'freeze') {
-                holding = true;
-                lastPalm = [null, null];
-                last2HDist = null;
-                clearGestureSelection();
-            } else if (placementShape && det.landmarks.length >= 1 && (gestures[0] === 'pinch' || gestures[0] === 'cupped')) {
-                interacting = true; posActive = true;
-                hideGestureHover();
-                gestureSelectRings.forEach(r => r.visible = false);
-                if(isDebug) console.log('🎯 PLACEMENT ACTIVE - gesture:', gestures[0], 'shape:', placementShape);
-                const hand = det.landmarks[0];
-
-                // Get hand center and finger spread differently for pinch vs cupped
-                let px, py, pz, fingerDist;
-                if (gestures[0] === 'pinch') {
-                    // Pinch: use thumb-index midpoint and their distance
-                    const thumb = hand[4], index = hand[8];
-                    px = (thumb.x + index.x) / 2;
-                    py = (thumb.y + index.y) / 2;
-                    pz = (thumb.z + index.z) / 2;
-                    fingerDist = Math.hypot(thumb.x - index.x, thumb.y - index.y, thumb.z - index.z);
-                } else {
-                    // Cupped: use palm center (wrist + middle finger middle knuckle average)
-                    // and use average finger spread as size control
-                    const wrist = hand[0], midFinger = hand[12];
-                    px = (wrist.x + midFinger.x) / 2;
-                    py = (wrist.y + midFinger.y) / 2;
-                    pz = (wrist.z + midFinger.z) / 2;
-                    // For cupped, measure spread: distance between thumb tip and pinky tip
-                    const thumb = hand[4], pinky = hand[20];
-                    fingerDist = Math.hypot(thumb.x - pinky.x, thumb.y - pinky.y, thumb.z - pinky.z);
-                }
-
-                // Raycast through the hand center to find the target surface point.
-                const ndc = new THREE.Vector2(-(px * 2 - 1), -(py * 2 - 1));
-                raycaster.setFromCamera(ndc, camera);
-                const hits = raycaster.intersectObject(mesh);
-                if(isDebug) console.log('🎯 Raycast hits:', hits.length, 'gesturePlacing:', gesturePlacing);
-
-                if (!gesturePlacing) {
-                    // First frame of gesture → spawn preview at the hit (if any).
-                    if (hits.length) {
-                        if(isDebug) console.log('🎯✨ SPAWNING PREVIEW at hit point');
-                        const inv = mesh.matrixWorld.clone().invert();
-                        const lp = hits[0].point.clone().applyMatrix4(inv);
-                        const ln = getHitNormal(hits[0]).transformDirection(inv).normalize();
-                        placementPos = { x: lp.x, y: lp.y, z: lp.z };
-                        placementNormal = ln;
-                        gesturePinchStartZ = pz;
-                        gesturePinchStartDist = fingerDist;
-                        smoothedScale = interactionState.placementSpec?.scale ?? 0.3;
-                        smoothedDepth = interactionState.placementSpec?.depth ?? 0.5;
-                        const previewGeo = SHAPES[placementShape]();
-                        if (placementPreview) {
-                            scene.remove(placementPreview);
-                            placementPreview.geometry.dispose();
-                        }
-                        placementPreview = new THREE.Mesh(previewGeo, previewMat);
-                        placementPreview.scale.setScalar(smoothedScale);
-                        scene.add(placementPreview);
-                        gesturePlacing = true;
-                    }
-                } else {
-                    // While gesturing: re-raycast to slide along surface (smoothed).
-                    if (hits.length) {
-                        const inv = mesh.matrixWorld.clone().invert();
-                        const lp = hits[0].point.clone().applyMatrix4(inv);
-                        const ln = getHitNormal(hits[0]).transformDirection(inv).normalize();
-                        // Lerp the local-anchor toward the new hit so the preview slides smoothly.
-                        placementPos.x += (lp.x - placementPos.x) * 0.25;
-                        placementPos.y += (lp.y - placementPos.y) * 0.25;
-                        placementPos.z += (lp.z - placementPos.z) * 0.25;
-                        // Normal is also lerped & re-normalized to avoid pops at face boundaries.
-                        placementNormal.lerp(ln, 0.25).normalize();
-                    }
-
-                    // Size scaling from finger spread
-                    if (gestures[0] === 'pinch') {
-                        // Pinch: ~0.04 = closed, ~0.30 = spread. Scale factor 5.0
-                        const targetScale = Math.max(0.1, Math.min(1.5, fingerDist * 5.0));
-                        smoothedScale += (targetScale - smoothedScale) * 0.25;
-                    } else {
-                        // Cupped: ~0.15 = partially closed, ~0.45 = wide spread. Scale factor 3.0
-                        const targetScale = Math.max(0.1, Math.min(1.5, fingerDist * 3.0));
-                        smoothedScale += (targetScale - smoothedScale) * 0.25;
-                    }
-
-                    // Target depth from hand z relative to gesture-start z.
-                    // Smaller z = closer to camera. Hand forward → push out → extrude.
-                    const dz = gesturePinchStartZ - pz;       // positive = moved forward
-                    const targetDepth = Math.max(-1, Math.min(1, 0.5 + dz * 12.0));
-                    smoothedDepth += (targetDepth - smoothedDepth) * 0.20;
-                    applyGesturePlacement();
-                }
-                // Skip the rest of the gesture branches while placing.
-                lastPalm = [null, null];
-                last2HDist = null;
-            } else {
-                // Gesture released or no longer in placement mode → commit if we were placing.
-                if (gesturePlacing) {
-                    if(isDebug) console.log('🎯 Gesture released → committing clean placement');
-                    commitGesturePlacement();
-                }
-                if (interactionState.activeOperation && gestures[0] !== 'pinch') {
-                    OperationController.commit();
-                }
-
-                // Gesture hover + pinch-once selection (only outside + placement mode).
-                if (!placementShape && det.landmarks.length === 1) {
-                    const h = det.landmarks[0];
-                    const g = gestures[0];
-                    const hx = (g === 'pinch') ? (h[4].x + h[8].x) * 0.5 : h[8].x;
-                    const hy = (g === 'pinch') ? (h[4].y + h[8].y) * 0.5 : h[8].y;
-                    const ndcHover = new THREE.Vector2(-(hx * 2 - 1), -(hy * 2 - 1));
-                    raycaster.setFromCamera(ndcHover, camera);
-                    const hoverHits = raycaster.intersectObject(mesh);
-                    if (hoverHits.length) {
-                        hoverHit = hoverHits[0];
-                        const r = Math.max(0.34, Math.min(1.4, brushRadius * 1.55));
-                        const inv = mesh.matrixWorld.clone().invert();
-                        const localPoint = hoverHit.point.clone().applyMatrix4(inv);
-                        const localNormal = getHitNormal(hoverHit).transformDirection(inv).normalize();
-                        showGestureHover(localPoint, localNormal, r);
-                    } else {
-                        hideGestureHover();
-                    }
-
-                    const pinchNow = (g === 'pinch');
-                    if (pinchNow && !pinchSelectLatch && hoverHit) {
-                        selectGestureRegion(hoverHit);
-                    }
-                    if (!pinchNow && !gestureSelection.active) hideGestureHover();
-                    pinchSelectLatch = pinchNow;
-                } else {
-                    hideGestureHover();
-                    pinchSelectLatch = false;
-                    pinchSculptLastZ = null;
-                    pinchSculptUndoArmed = false;
-                    if (!gestureSelection.active) gestureSelectRings.forEach(r => r.visible = false);
-                }
-
-            // ----- Blend-mode depth control via fist forward/back (single-hand) -----
-            if (blendPanel.classList.contains('open') && det.landmarks.length === 1 && gestures[0] === 'fist') {
-                // Use wrist z (negative = closer to camera in MediaPipe coords)
-                const wz = det.landmarks[0][0].z;
-                if (lastFistZ !== null) {
-                    const dz = wz - lastFistZ;          // negative = moving forward
-                    blendDepth = Math.max(-1, Math.min(1, blendDepth - dz * 6.0));
-                    blDepthEl.value = blendDepth;
-                    blDepthV.textContent = fmtSigned(blendDepth);
-                    updateBlendPreview();
-                }
-                lastFistZ = wz;
-            } else {
-                lastFistZ = null;
-            }
-
-            // Two hands
-            if(det.landmarks.length===2) {
-                const h1=det.landmarks[0],h2=det.landmarks[1];
-                const g1=gestures[0], g2=gestures[1];
-                const d=Math.hypot(h1[9].x-h2[9].x,h1[9].y-h2[9].y);
-
-                // Both open → SCALE
-                if(g1==='palm' && g2==='palm' && last2HDist!==null){
-                    const dd = GestureInterpreter.filteredScaleDelta(last2HDist, d);
-                    if(dd){let s=Math.max(0.2,Math.min(5,mesh.scale.x-dd*0.8));mesh.scale.setScalar(THREE.MathUtils.lerp(mesh.scale.x, s, 0.45));rotVX=0;rotVY=0;}
-                    posActive = true;
-                }
-
-                // ============= TWO-HAND MOLDING PATTERNS =============
-
-                // Freeze + Cupped: One hand holds (fist), other hand sculpts (cupped)
-                // → Single-sided molding: place/sculpt on one region while anchored by freeze hand
-                if ((g1 === 'fist' && g2 === 'cupped') || (g1 === 'cupped' && g2 === 'fist')) {
-                    rotVX = 0; rotVY = 0;  // Freeze rotation
-                    posActive = true;
-                    // The cupped hand drives placement/sculpting; fist hand acts as anchor
-                    const cuppedHand = (g1 === 'cupped') ? h1 : h2;
-                    const wrist = cuppedHand[0], midFinger = cuppedHand[12];
-                    const px = (wrist.x + midFinger.x) / 2;
-                    const py = (wrist.y + midFinger.y) / 2;
-                    const thumb = cuppedHand[4], pinky = cuppedHand[20];
-                    const fingerSpread = Math.hypot(thumb.x - pinky.x, thumb.y - pinky.y, thumb.z - pinky.z);
-
-                    // Raycast for sculpting position
-                    const ndc = new THREE.Vector2(-(px * 2 - 1), -(py * 2 - 1));
-                    raycaster.setFromCamera(ndc, camera);
-                    const hits = raycaster.intersectObject(mesh);
-                    if (hits.length) {
-                        // Motion-driven molding: drag the clay with the cupped hand.
-                        const prev = lastCuppedPos[g1 === 'cupped' ? 0 : 1];
-                        const oldR = brushRadius;
-                        brushRadius = Math.max(0.2, Math.min(1.0, fingerSpread * 2.5));
-                        if (prev) {
-                            const dx = (px - prev.x) * innerWidth;
-                            const dy = (py - prev.y) * innerHeight;
-                            if (gestureSelection.active) {
-                                moveSelectedPatchByScreenDelta(dx, dy);
-                                syncSelectionAfterGeometryChange(false);
-                            } else {
-                                grabAt(hits[0].point, dx, dy);
-                            }
-                        } else {
-                            smoothAt(hits[0].point);
-                        }
-                        brushRadius = oldR;
-                    }
-                    lastCuppedPos[g1 === 'cupped' ? 0 : 1] = { x: px, y: py };
-                    // Visual feedback: debug command shows freeze+mold pattern
-                }
-
-                // Dual Cupped: Both hands cupped → Symmetric molding on both sides
-                // → Multi-region molding: sculpt mirror-symmetric or independent regions
-                else if (g1 === 'cupped' && g2 === 'cupped') {
-                    rotVX = 0; rotVY = 0;  // Freeze rotation for stability
-                    posActive = true;
-
-                    // Both hands drive sculpting on their respective regions
-                    for (let h = 0; h < 2; h++) {
-                        const hand = (h === 0) ? h1 : h2;
-                        const wrist = hand[0], midFinger = hand[12];
-                        const px = (wrist.x + midFinger.x) / 2;
-                        const py = (wrist.y + midFinger.y) / 2;
-                        const thumb = hand[4], pinky = hand[20];
-                        const fingerSpread = Math.hypot(thumb.x - pinky.x, thumb.y - pinky.y, thumb.z - pinky.z);
-
-                        const ndc = new THREE.Vector2(-(px * 2 - 1), -(py * 2 - 1));
-                        raycaster.setFromCamera(ndc, camera);
-                        const hits = raycaster.intersectObject(mesh);
-                        if (hits.length) {
-                            // Each cupped hand deforms independently based on its motion.
-                            const prev = lastCuppedPos[h];
-                            const oldR = brushRadius;
-                            brushRadius = Math.max(0.2, Math.min(1.0, fingerSpread * 2.5));
-                            if (prev) {
-                                const dx = (px - prev.x) * innerWidth;
-                                const dy = (py - prev.y) * innerHeight;
-                                if (gestureSelection.active) {
-                                    moveSelectedPatchByScreenDelta(dx, dy);
-                                    syncSelectionAfterGeometryChange(false);
-                                } else {
-                                    grabAt(hits[0].point, dx, dy);
-                                }
-                            } else {
-                                smoothAt(hits[0].point);
-                            }
-                            brushRadius = oldR;
-                        }
-                        lastCuppedPos[h] = { x: px, y: py };
-                    }
-                    // Visual feedback: debug command shows dual-mold pattern
-                }
-
-                // Both pinch → TRANSLATE or SPLIT
-                else if(g1==='pinch' && g2==='pinch'){
-                    if(splitActive){
-                        // Move halves apart based on hand distance
-                        const spread=(d-splitStartDist)*3.0;
-                        if(splitLeft) splitLeft.position.x=splitOriginX-Math.max(0,spread);
-                        if(splitRight) splitRight.position.x=splitOriginX+Math.max(0,spread);
-                    }
-                    else if(last2HDist!==null && d>0.3 && d-last2HDist>0.03) {
-                        // Hands spreading apart fast enough → SPLIT
-                        saveUndo();
-                        splitMesh(d);
-                    }
-                    else if(!splitActive) {
-                        // Normal translate
-                        const px=(h1[4].x+h1[8].x+h2[4].x+h2[8].x)/4;
-                        const py=(h1[4].y+h1[8].y+h2[4].y+h2[8].y)/4;
-                        const intent = GestureInterpreter.intentForHand({ 4: { x: px, y: py, z: 0 }, 8: { x: px, y: py, z: 0 }, 0: { z: 0 } }, 'pinch');
-                        const v=new THREE.Vector3(intent.anchorNdc.x,intent.anchorNdc.y,0.5).unproject(camera);
-                        v.sub(camera.position).normalize();
-                        const t=(mesh.position.z-camera.position.z)/v.z;
-                        mesh.position.lerp(camera.position.clone().add(v.multiplyScalar(t)),0.2);
-                        rotVX=0;rotVY=0;
-                        posActive = true;
-                    }
-                } else if(splitActive) {
-                    // Released pinch while split — finalize
-                    finalizeSplit();
-                }
-                last2HDist=d;
-            } else last2HDist=null;
-
-            // Single hand
-            det.landmarks.forEach((hand,idx)=>{
-                if(idx>0&&det.landmarks.length===2)return;
-                if(idx>1)return;
-                const palm=hand[9];
-                const g = gestures[idx];
-
-                if(g==='fist'){holding=true;lastPalm[idx]=null;return;}
-                if(det.landmarks.length===2)return;
-
-                // Single pinch → TRANSLATE
-                if(g==='pinch'){
-                    const intent = GestureInterpreter.intentForHand(hand, g);
-                    const px=(hand[4].x+hand[8].x)/2,py=(hand[4].y+hand[8].y)/2;
-                    const pinchZ = (hand[4].z + hand[8].z) * 0.5;
-
-                    if (gestureSelection.active && idx === 0) {
-                        sculptSelectedRegion(pinchZ);
-
-                        if (hoverHit) {
-                            const inv = mesh.matrixWorld.clone().invert();
-                            const nextPoint = hoverHit.point.clone().applyMatrix4(inv);
-                            const nextNormal = getHitNormal(hoverHit).transformDirection(inv).normalize();
-                            gestureSelection.pointLocal.lerp(nextPoint, 0.22);
-                            gestureSelection.normalLocal.lerp(nextNormal, 0.22).normalize();
-                        }
-                        updateGestureSelectionViz();
-                        lastPalm[idx]=null;rotVX=0;rotVY=0;
-                        posActive = true;
-                    } else {
-                        const ndc=intent.anchorNdc;
-                        const v=new THREE.Vector3(ndc.x,ndc.y,0.5).unproject(camera);
-                        v.sub(camera.position).normalize();
-                        const t=(mesh.position.z-camera.position.z)/v.z;
-                        mesh.position.lerp(camera.position.clone().add(v.multiplyScalar(t)),0.15);
-                        pinchSculptLastZ = null;
-                        pinchSculptUndoArmed = false;
-                        lastPalm[idx]=null;rotVX=0;rotVY=0;
-                        posActive = true;
-                    }
-                }
-                // Single cupped → GENTLE SCULPT / MOLD
-                else if(g==='cupped'){
-                    // Use cupped hand to sculpt softly (smoothing, molding)
-                    const wrist = hand[0], midFinger = hand[12];
-                    const px = (wrist.x + midFinger.x) / 2;
-                    const py = (wrist.y + midFinger.y) / 2;
-                    const thumb = hand[4], pinky = hand[20];
-                    const fingerSpread = Math.hypot(thumb.x - pinky.x, thumb.y - pinky.y, thumb.z - pinky.z);
-
-                    const ndc = new THREE.Vector2(-(px * 2 - 1), -(py * 2 - 1));
-                    raycaster.setFromCamera(ndc, camera);
-                    const hits = raycaster.intersectObject(mesh);
-                    if (hits.length) {
-                        // Drag the surface with the cupped hand so molding is visible.
-                        const prev = lastCuppedPos[idx];
-                        const oldR = brushRadius;
-                        brushRadius = Math.max(0.3, Math.min(1.2, fingerSpread * 2.5));
-                        if (prev) {
-                            const dx = (px - prev.x) * innerWidth;
-                            const dy = (py - prev.y) * innerHeight;
-                            if (gestureSelection.active) {
-                                moveSelectedPatchByScreenDelta(dx, dy);
-                                syncSelectionAfterGeometryChange(false);
-                            } else {
-                                grabAt(hits[0].point, dx, dy);
-                            }
-                        } else {
-                            smoothAt(hits[0].point);
-                        }
-                        brushRadius = oldR;
-                    }
-                    lastCuppedPos[idx] = { x: px, y: py };
-                    lastPalm[idx]=null;rotVX=0;rotVY=0;
-                    posActive = true;
-                }
-                // Open palm → ROTATE
-                else if(g==='palm'){
-                    pinchSculptLastZ = null;
-                    pinchSculptUndoArmed = false;
-                    if (interactionState.activeOperation) OperationController.commit();
-                    lastCuppedPos[idx] = null;
-                    if(lastPalm[idx]){const dx=palm.x-lastPalm[idx].x,dy=palm.y-lastPalm[idx].y;rotVX-=dx*5;rotVY+=dy*5;}
-                    lastPalm[idx]=palm;
-                } else {
-                    pinchSculptLastZ = null;
-                    pinchSculptUndoArmed = false;
-                    if (interactionState.activeOperation) OperationController.commit();
-                    lastPalm[idx]=null; lastCuppedPos[idx]=null;
-                    if (gestureSelection.active && g === null) hideGestureHover();
-                }
-            });
-            }  // ← close `else` of placement-mode interception
-        } else {
-            // No hands detected. If we were mid-placement, commit the current preview
-            // so the user doesn't get stuck with a floating ghost shape.
-            if (gesturePlacing) {
-                gesturePlacing = false;
-                commitGesturePlacement();
-            }
-            if (interactionState.activeOperation) OperationController.commit();
-            lastPalm=[null,null];
-            lastCuppedPos=[null,null];
-            resetGestureState();
-        }
-    }
-
-    if(holding || interactionMode === 'freeze'){rotVX=0;rotVY=0;}
-    mesh.rotation.y+=rotVX;mesh.rotation.x+=rotVY;
-    rotVX*=0.85;rotVY*=0.85;
-    if(!interacting&&Math.abs(rotVX)<0.01)mesh.rotation.y+=0.002;
-    // Drift mesh back to scene origin when not actively translating/scaling, so the
-    // object stays centred on screen instead of stranded wherever the last gesture
-    // left it. Skipped during split (two separate meshes are being positioned).
-    if (!posActive && !splitActive && !mDown) {
-        mesh.position.lerp(_recenterTarget, 0.06);
-    }
-    const tz=Math.max(4,mesh.scale.x*3);camera.position.z+=(tz-camera.position.z)*0.08;
-    renderer.render(scene,camera);
-}
-
-// ============================================================
-// 8. MOUSE SCULPTING
-// ============================================================
-let mDown=false, mBtn=-1, mLast={x:0,y:0}, mOnMesh=false, mUndoSaved=false;
-let mouseOperationStartY = 0;
-window.addEventListener('contextmenu',e=>e.preventDefault());
-
-window.addEventListener('mousedown',e=>{
-    // Placement mode: click on mesh to start placing.
-    if(placementShape&&e.button===0&&!gesturePlacing){
-        const nx=(e.clientX/innerWidth)*2-1,ny=-(e.clientY/innerHeight)*2+1;
-        raycaster.setFromCamera(new THREE.Vector2(nx,ny),camera);
-        const h=raycaster.intersectObject(mesh);
-        if(h.length){
-            const inv=mesh.matrixWorld.clone().invert();
-            const lp=h[0].point.clone().applyMatrix4(inv);
-            const ln=getHitNormal(h[0]).transformDirection(inv).normalize();
-            placementPos = { x: lp.x, y: lp.y, z: lp.z };
-            placementNormal = ln;
-            placementStartY = e.clientY;
-            placementStartX = e.clientX;
-            placementDragging = true;
-            blendDepth = interactionState.placementSpec?.depth ?? 0.5;
-            blendStrength = interactionState.placementSpec?.blendStrength ?? 0.7;
-            // Create preview using the current placement spec.
-            const previewGeo = SHAPES[placementShape]();
-            placementPreview = new THREE.Mesh(previewGeo, previewMat);
-            const initS = interactionState.placementSpec?.scale ?? 0.3;
-            const initDepth = interactionState.placementSpec?.depth ?? 0.5;
-            const offWorld = getHitNormal(h[0]).normalize().multiplyScalar(initS * initDepth);
-            placementPreview.position.copy(h[0].point).add(offWorld);
-            placementPreview.scale.setScalar(initS);
-            scene.add(placementPreview);
-            placementLabel.textContent = `Drag ↑↓ size  ←→ depth  — release to lock`;
-        }
-        return;
-    }
-    mDown=true;mBtn=e.button;mUndoSaved=false;mLast={x:e.clientX,y:e.clientY};
-    const nx=(e.clientX/innerWidth)*2-1,ny=-(e.clientY/innerHeight)*2+1;
-    raycaster.setFromCamera(new THREE.Vector2(nx,ny),camera);
-    const hits = raycaster.intersectObject(mesh);
-    mOnMesh=hits.length>0;
-    if (mOnMesh && mBtn === 0 && (interactionMode === 'form' || interactionMode === 'detail')) {
-        SelectionController.selectHit(hits[0], Math.max(0.34, Math.min(1.45, brushRadius * 1.65)));
-        mouseOperationStartY = e.clientY;
-        const opId = interactionMode === 'detail' ? 'bevel-lite' : 'extrude-lite';
-        OperationController.begin(opId, { source: 'mouse' });
-        return;
-    }
-    if(mOnMesh&&mBtn!==1){saveUndo();mUndoSaved=true;}
-});
-
-window.addEventListener('mousemove',e=>{
-    // Placement drag: resize preview AND adjust depth
-    if(placementDragging&&placementPreview){
-        updatePreviewFromDrag(e.clientX, e.clientY);
-        return;
-    }
-    const nx=(e.clientX/innerWidth)*2-1,ny=-(e.clientY/innerHeight)*2+1;
-    raycaster.setFromCamera(new THREE.Vector2(nx,ny),camera);
-    const hits=raycaster.intersectObject(mesh);
-    if(!mDown){
-        if(hits.length){
-            showBrush(hits[0].point,getHitNormal(hits[0]));
-            if (interactionMode === 'form' || interactionMode === 'detail') {
-                const inv = mesh.matrixWorld.clone().invert();
-                showGestureHover(hits[0].point.clone().applyMatrix4(inv), getHitNormal(hits[0]).transformDirection(inv).normalize(), Math.max(0.34, Math.min(1.4, brushRadius * 1.45)));
-            }
-        } else {
-            hideBrush();
-            if (!gestureSelection.active) hideGestureHover();
-        }
-        return;
-    }
-    const dx=e.clientX-mLast.x,dy=e.clientY-mLast.y;mLast={x:e.clientX,y:e.clientY};
-    if (interactionState.activeOperation && (interactionMode === 'form' || interactionMode === 'detail')) {
-        const nextValue = (mouseOperationStartY - e.clientY) * 0.006;
-        OperationController.update(nextValue);
-        return;
-    }
-    if(!mOnMesh||mBtn===1){rotVX+=dx*0.003;rotVY+=dy*0.003;}
-    else if(hits.length){
-        if (interactionMode === 'freeze') return;
-        if (interactionMode === 'select') {
-            rotVX += dx * 0.003;
-            rotVY += dy * 0.003;
-            return;
-        }
-        showBrush(hits[0].point,getHitNormal(hits[0]));
-        if(e.shiftKey){
-            if (gestureSelection.active) applyToolToSelection(dx, dy);
-            else smoothAt(hits[0].point);
-        }
-        else{
-            const saved=activeTool;
-            if(mBtn===2){if(activeTool==='pull')activeTool='push';else if(activeTool==='push')activeTool='pull';}
-            if (gestureSelection.active && interactionMode === 'sculpt') applyToolToSelection(dx, dy);
-            else applyTool(hits[0],dx,dy);
-            activeTool=saved;
-        }
-    }
-});
-
-window.addEventListener('mouseup',()=>{
-    if(placementDragging){
-        // Lock and commit immediately on release (no extra panel step).
-        placementDragging = false;
-        commitPlacementBlended();
-        return;
-    }
-    if (interactionState.activeOperation) OperationController.commit();
-    mDown=false;mBtn=-1;mOnMesh=false;mUndoSaved=false;
-});
-window.addEventListener('wheel',e=>{brushRadius=Math.max(0.1,Math.min(1.5,brushRadius-e.deltaY*0.001));document.getElementById('br').value=brushRadius;document.getElementById('brv').textContent=brushRadius.toFixed(2);});
-
-initHands();
-
-// ============================================================
-// 8b. SPLICE-STYLE TOOLBAR WIRING
-// ============================================================
-let interactionMode = 'select';
-let gestureAdaptiveMode = true;
-const modeHintEl = document.getElementById('mode-hint');
-const modeButtons = Array.from(document.querySelectorAll('.splice-mode-btn'));
-const spliceAddBtn = document.getElementById('splice-add-btn');
-const spliceDuplicateBtn = document.getElementById('splice-duplicate-btn');
-const shapeTrigger = document.getElementById('splice-shape-trigger');
-const shapeMenu = document.getElementById('splice-shape-menu');
-shapeLabel = document.getElementById('splice-shape-label');
-shapeItems = Array.from(document.querySelectorAll('.splice-shape-item'));
-
-const MODE_LABELS = {
-    select: 'Navigate',
-    sculpt: 'Sculpt',
-    form: 'Form',
-    detail: 'Detail',
-    freeze: 'Freeze',
-    add: 'Place',
-};
-const MODE_ICONS = {
-    select: '↖',
-    sculpt: '✋',
-    form: '✍',
-    detail: '◌',
-    freeze: '✊',
-    add: '▷',
-};
-
-const MODE_TOOL = {
-    sculpt: 'pull',
-    form: 'grab',
-    detail: 'crease',
-};
-
-function syncShapeUi(name) {
-    if (shapeLabel) {
-        shapeLabel.textContent = SHAPE_LABELS[name] || name;
-    }
-    shapeItems.forEach(item => item.classList.toggle('active', item.dataset.shape === name));
-    document.querySelectorAll('[data-shape-swap]').forEach(btn => {
-        btn.style.borderWidth = btn.dataset.shapeSwap === name ? '3px' : '1.5px';
-    });
-}
-
-function syncModeUi(source = 'ui') {
-    modeButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.mode === interactionMode));
-    if (modeHintEl) {
-        const locked = performance.now() < modeLockUntil;
-        const lead = source === 'gesture'
-            ? 'Mode: ' + MODE_LABELS[interactionMode] + ' · by gesture'
-            : 'Mode: ' + MODE_LABELS[interactionMode] + (locked ? ' · locked' : ' · gesture adaptive');
-        modeHintEl.textContent = lead;
-    }
-    if (gestureSelection.active) updateGestureSelectionViz();
-}
-
-function setInteractionMode(mode, source = 'ui') {
-    if (!MODE_LABELS[mode]) return;
-    if (source === 'gesture' && performance.now() < modeLockUntil) return;
-    if (interactionMode === mode) {
-        if (mode === 'add' && !placementShape) startPlacement(currentShape);
-        return;
-    }
-    interactionMode = mode;
-    interactionState.mode = mode;
-    if (source === 'ui') modeLockUntil = performance.now() + GESTURE_TUNING.modeLockMs;
-
-    if (mode === 'add') {
-        if (!placementShape) startPlacement(currentShape);
-    } else if (placementShape && !gesturePlacing) {
-        cancelPlacement();
-    }
-
-    if (MODE_TOOL[mode]) setActiveTool(MODE_TOOL[mode]);
-    if (mode === 'freeze') setCommandStatus('Freeze mode: motion locked');
-    else setCommandStatus('Mode: ' + MODE_LABELS[mode]);
-    syncModeUi(source);
-}
-
-modeButtons.forEach(btn => {
-    const mode = btn.dataset.mode;
-    btn.innerHTML = `<span class="splice-mode-icon">${MODE_ICONS[mode] || ''}</span><span class="splice-mode-name">${MODE_LABELS[mode] || mode}</span>`;
-});
-interactionState.mode = interactionMode;
-
-function adaptModeFromGestures(gestures, handCount) {
-    if (!gestureAdaptiveMode || !handsEnabled || placementShape || blendPanel.classList.contains('open')) return;
-    if (handCount === 2 && gestures[0] === 'palm' && gestures[1] === 'palm') {
-        setInteractionMode('select', 'gesture');
-        return;
-    }
-    if (gestures.includes('fist')) {
-        setInteractionMode('freeze', 'gesture');
-        return;
-    }
-    if (gestures.includes('cupped')) {
-        setInteractionMode('sculpt', 'gesture');
-        return;
-    }
-    if (gestures.includes('pinch')) {
-        setInteractionMode('form', 'gesture');
-        return;
-    }
-    if (gestures.includes('palm')) {
-        setInteractionMode('select', 'gesture');
-    }
-}
-
-if (shapeTrigger && shapeMenu) {
-    shapeTrigger.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const willOpen = !shapeMenu.classList.contains('open');
-        shapeMenu.classList.toggle('open', willOpen);
-        shapeTrigger.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
-    });
-    document.addEventListener('click', () => {
-        shapeMenu.classList.remove('open');
-        shapeTrigger.setAttribute('aria-expanded', 'false');
-    });
-    shapeMenu.addEventListener('click', (e) => e.stopPropagation());
-}
-
-shapeItems.forEach(item => {
-    item.addEventListener('click', () => {
-        const nextShape = item.dataset.shape;
-        if (!SHAPES[nextShape]) return;
-        saveUndo();
-        setShape(nextShape);
-        shapeMenu.classList.remove('open');
-        shapeTrigger.setAttribute('aria-expanded', 'false');
-        if (interactionMode === 'add') {
-            cancelPlacement();
-            startPlacement(nextShape);
-        }
-        setCommandStatus('Picked up: ' + (SHAPE_LABELS[nextShape] || nextShape));
-    });
-});
-
-if (spliceAddBtn) {
-    spliceAddBtn.addEventListener('click', () => {
-        setInteractionMode('add', 'ui');
-    });
-}
-
-if (spliceDuplicateBtn) {
-    spliceDuplicateBtn.addEventListener('click', () => {
-        if (!beginDuplicatePlacement()) setCommandStatus('Duplicate Last needs a placed shape first');
-    });
-}
-
-modeButtons.forEach(btn => {
-    btn.addEventListener('click', () => {
-        setInteractionMode(btn.dataset.mode, 'ui');
-    });
-});
-
-syncModeUi('ui');
-syncShapeUi(currentShape);
-
-// ============================================================
-// 9. CAT AI (Boba)
-// ============================================================
-const chatInput=document.getElementById('chat-input'),sendBtn=document.getElementById('send-btn'),micBtn=document.getElementById('mic-btn');
-const catDialogue=document.getElementById('cat-dialogue'),chatHistoryContainer=document.getElementById('chat-history-container');
-const chatHistory=document.getElementById('chat-history'),toggleHistoryBtn=document.getElementById('toggle-history-btn');
-const bgMusic=document.getElementById('bg-music'),musicToggleBtn=document.getElementById('music-toggle-btn');
-const quickCommandButtons=document.querySelectorAll('[data-quick-command]');
-const commandStatus=document.getElementById('command-status');
-let isMusicPlaying=false;bgMusic.volume=0.2;
-musicToggleBtn.addEventListener('click',()=>{if(isMusicPlaying){bgMusic.pause();musicToggleBtn.textContent='🔇 Music Off';}else{bgMusic.play().catch(()=>{});musicToggleBtn.textContent='🎵 Music On';}isMusicPlaying=!isMusicPlaying;});
-let isHistoryOpen=false;
+let currentAppMode = 'gallery';
+let currentProjectId = null; // ID of currently loaded project for "Save" overwrite
+let activeTool = 'move'; // current toolbar tool
 
 function setCommandStatus(text) {
-    if (commandStatus) commandStatus.textContent = text;
+    const el = document.getElementById('command-status');
+    if (el) el.textContent = text;
+    const hint = document.getElementById('mode-hint');
+    if (hint) hint.textContent = text;
 }
 
-function runQuickCommand(commandText) {
-    chatInput.value = commandText;
-    catCmd(commandText);
-    chatInput.value = '';
+// Per-mode saved mesh state so switching modes doesn't destroy work
+const modeStates = { model: null, abstract: null };
+
+function saveModeState(modeName) {
+    if (!mesh) return;
+    modeStates[modeName] = {
+        positions: new Float32Array(mesh.geometry.attributes.position.array),
+        normals: mesh.geometry.attributes.normal ? new Float32Array(mesh.geometry.attributes.normal.array) : null,
+        colors: mesh.geometry.attributes.color ? new Float32Array(mesh.geometry.attributes.color.array) : null,
+        color: material.color.getHex(),
+        scale: mesh.scale.toArray(),
+        position: mesh.position.toArray(),
+        rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+        vertexColors: material.vertexColors,
+    };
 }
 
-quickCommandButtons.forEach(button => {
-    button.addEventListener('click', () => runQuickCommand(button.dataset.quickCommand));
-});
-
-function catCmd(cmd){
-    const lc=cmd.toLowerCase();let resp='',done=false;
-    for(const n of Object.keys(SHAPES)){if(lc.includes(n)){saveUndo();setShape(n);resp=`Switched to ${n}! 🎨`;done=true;setCommandStatus(`Picked up: ${n}`);break;}}
-    if(!done&&/\b(reset|new|restart|clear)\b/i.test(lc)){saveUndo();resp="Fresh! 🆕";setShape(currentShape);done=true;setCommandStatus('Picked up: reset');}
-    else if(!done&&/\b(bigger|larger|grow|expand)\b/i.test(lc)){saveUndo();resp="Growing!";mesh.scale.multiplyScalar(1.3);done=true;setCommandStatus('Picked up: scale up');}
-    else if(!done&&/\b(smaller|tiny|shrink)\b/i.test(lc)){saveUndo();resp="Shrinking!";mesh.scale.multiplyScalar(0.7);done=true;setCommandStatus('Picked up: scale down');}
-    else if(!done&&/\b(red|pink)\b/i.test(lc)){saveUndo();material.color.setHex(0xe66767);resp="Red! 🍓";done=true;setCommandStatus('Picked up: red');}
-    else if(!done&&/\b(blue|azure)\b/i.test(lc)){saveUndo();material.color.setHex(0xa8c3e6);resp="Blue! 🫐";done=true;setCommandStatus('Picked up: blue');}
-    else if(!done&&/\b(green|sage)\b/i.test(lc)){saveUndo();material.color.setHex(0x9cb89c);resp="Green! 🌿";done=true;setCommandStatus('Picked up: sage green');}
-    else if(!done&&/\b(yellow|gold)\b/i.test(lc)){saveUndo();material.color.setHex(0xf4d03f);resp="Yellow! ☀️";done=true;setCommandStatus('Picked up: yellow');}
-    else if(!done&&/\b(white|cream)\b/i.test(lc)){saveUndo();material.color.setHex(0xfffaec);resp="White! 🥛";done=true;setCommandStatus('Picked up: cream');}
-    else if(!done&&/\b(dark|black)\b/i.test(lc)){saveUndo();material.color.setHex(0x333333);resp="Dark! 🐈‍⬛";done=true;setCommandStatus('Picked up: dark');}
-    else if(!done&&/\b(metal|shiny)\b/i.test(lc)){saveUndo();material.metalness=0.8;material.roughness=0.1;material.needsUpdate=true;resp="Shiny! ✨";done=true;setCommandStatus('Picked up: metal');}
-    else if(!done&&/\b(matte|clay)\b/i.test(lc)){saveUndo();material.metalness=0.1;material.roughness=0.8;material.needsUpdate=true;resp="Matte! 🧱";done=true;setCommandStatus('Picked up: matte clay');}
-    else if(!done&&/\b(glass|transparent)\b/i.test(lc)){saveUndo();material.transparent=true;material.opacity=0.5;material.metalness=1;material.roughness=0;material.needsUpdate=true;resp="Glass! 🧊";done=true;setCommandStatus('Picked up: glass');}
-    else if(!done&&/\b(wireframe|lines)\b/i.test(lc)){saveUndo();material.wireframe=!material.wireframe;material.needsUpdate=true;resp="Wireframe! 📐";done=true;setCommandStatus('Picked up: wireframe');}
-    else if(!done&&/\b(export|stl|print)\b/i.test(lc)){document.getElementById('export-btn').click();resp="Exporting STL! 💾";done=true;setCommandStatus('Picked up: export STL');}
-    else if(!done&&(/\b(help|how)\b/i.test(lc)||cmd.length>25)){resp="Mouse: left=pull, right=push, shift=smooth. Hands: palm=rotate, pinch=move, two palms=scale, two pinches apart=split. Try shapes, colors, 'export stl'!";done=true;setCommandStatus('Picked up: help');}
-    if(!done){resp="Meow? Try shapes (sphere,cube,torus), colors, 'export stl', or 'reset'!";setCommandStatus('Command idle');}
-    catDialogue.style.opacity=0;setTimeout(()=>{catDialogue.style.opacity=1;catDialogue.innerHTML=`<em>"${resp}"</em>`;const u=document.createElement("li");u.className="history-user";u.textContent=`You: "${cmd}"`;const b=document.createElement("li");b.className="history-cat";b.textContent=`Cat: "${resp}"`;chatHistory.appendChild(u);chatHistory.appendChild(b);chatHistoryContainer.scrollTop=chatHistoryContainer.scrollHeight;},200);
+function restoreModeState(modeName) {
+    const s = modeStates[modeName];
+    if (!s) return false;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(s.positions), 3));
+    if (s.normals) g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(s.normals), 3));
+    if (s.colors) g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(s.colors), 3));
+    if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+    mesh = new THREE.Mesh(g, material);
+    g.computeVertexNormals();
+    refreshWireframe();
+    scene.add(mesh);
+    material.color.setHex(s.color);
+    material.vertexColors = s.vertexColors;
+    material.needsUpdate = true;
+    mesh.scale.fromArray(s.scale);
+    mesh.position.fromArray(s.position);
+    mesh.rotation.set(s.rotation[0], s.rotation[1], s.rotation[2]);
+    return true;
 }
 
-toggleHistoryBtn.addEventListener('click',()=>{isHistoryOpen=!isHistoryOpen;chatHistoryContainer.style.display=isHistoryOpen?'block':'none';});
-sendBtn.addEventListener('click',()=>{if(chatInput.value.trim()){catCmd(chatInput.value);chatInput.value='';}});
-chatInput.addEventListener('keypress',e=>{if(e.key==='Enter'&&chatInput.value.trim()){catCmd(chatInput.value);chatInput.value='';}});
+function applyAppMode(name) {
+    if (name === currentAppMode) return;
+    const prevMode = currentAppMode;
+    currentAppMode = name;
+    document.body.dataset.appmode = name;
 
-const catChar=document.getElementById('cat-character'),chatUI=document.getElementById('chat-interface');
-const eyeOpen=document.getElementById('right-eye-open'),eyeWink=document.getElementById('right-eye-wink');
-let chatVis=true;
-catChar.addEventListener('click',()=>{chatVis=!chatVis;chatUI.style.display=chatVis?'flex':'none';eyeOpen.style.display='none';eyeWink.style.display='block';if(chatVis){catDialogue.style.opacity=0;setTimeout(()=>{catDialogue.innerHTML='<em>"Meow! ✨"</em>';catDialogue.style.opacity=1;},150);}setTimeout(()=>{eyeOpen.style.display='block';eyeWink.style.display='none';},450);});
+    const modelActions = document.getElementById('model-actions');
+    const sketchActions = document.getElementById('sketch-actions');
+    const freeformActions = document.getElementById('freeform-actions');
+    const sketchCanvas = document.getElementById('sketch-canvas');
+    const canvasContainer = document.getElementById('canvas-container');
+    const spliceWrap = document.getElementById('splice-toolbar-wrap');
+    const guide = document.getElementById('instructions-guide');
+    const sketchGuide = document.getElementById('sketch-guide');
+    const freeformGuide = document.getElementById('freeform-guide');
+    const galleryView = document.getElementById('gallery-view');
 
-const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-if(SR){const r=new SR();r.continuous=false;r.lang='en-US';r.onstart=()=>{micBtn.classList.add('recording');catDialogue.innerHTML='<em>Listening...</em>';};r.onresult=e=>{const t=e.results[0][0].transcript;chatInput.value=t;catCmd(t);chatInput.value='';};r.onerror=()=>micBtn.classList.remove('recording');r.onend=()=>micBtn.classList.remove('recording');micBtn.addEventListener('click',()=>r.start());}else micBtn.style.display='none';
+    // Hide everything first
+    if (modelActions) modelActions.style.display = 'none';
+    if (sketchActions) sketchActions.style.display = 'none';
+    if (freeformActions) freeformActions.style.display = 'none';
+    if (sketchCanvas) sketchCanvas.style.display = 'none';
+    if (canvasContainer) canvasContainer.style.display = 'none';
+    if (spliceWrap) spliceWrap.style.display = 'none';
+    if (guide) guide.style.display = 'none';
+    if (sketchGuide) sketchGuide.style.display = 'none';
+    if (freeformGuide) freeformGuide.style.display = 'none';
+    if (galleryView) galleryView.style.display = 'none';
+
+    grid.visible = false;
+
+    document.querySelectorAll('.ws-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.appmode === name));
+
+    if (name === 'model') {
+        if (modelActions) modelActions.style.removeProperty('display');
+        if (canvasContainer) canvasContainer.style.removeProperty('display');
+        if (spliceWrap) spliceWrap.style.removeProperty('display');
+        if (guide) guide.style.removeProperty('display');
+        grid.visible = true;
+        resetCamera();
+        renderer.setSize(innerWidth, innerHeight);
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        // Auto-add a default sphere if scene is empty
+        if (sceneObjects.length === 0) {
+            const entry = addSceneObject('sphere', new THREE.Vector3(0, 0, 0), 0.5);
+            selectObject(entry);
+            setCommandStatus('Welcome! Sphere added. Use + Add for more shapes.');
+        }
+    } else if (name === 'sketch') {
+        if (sketchActions) sketchActions.style.removeProperty('display');
+        if (sketchCanvas) sketchCanvas.style.display = 'block';
+        if (sketchGuide) sketchGuide.style.removeProperty('display');
+        initSketchCanvas();
+    } else if (name === 'gallery') {
+        if (galleryView) galleryView.style.display = 'block';
+        renderGallery();
+    } else if (name === 'freeform') {
+        if (freeformActions) freeformActions.style.removeProperty('display');
+        if (canvasContainer) canvasContainer.style.removeProperty('display');
+        if (freeformGuide) freeformGuide.style.removeProperty('display');
+        grid.visible = true;
+        resetCamera();
+        renderer.setSize(innerWidth, innerHeight);
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        // Auto-add a starter cube if scene is empty
+        if (sceneObjects.length === 0) {
+            const entry = addSceneObject('cube', new THREE.Vector3(0, 0, 0), 0.5);
+            selectObject(entry);
+            setCommandStatus('Freeform mode! Add shapes & sculpt with your hands.');
+        } else {
+            setCommandStatus('Freeform mode — pinch to grab, palm to rotate, add shapes from toolbar');
+        }
+    }
+}
 
 // ============================================================
-// 10. WORKSHOP TOP-BAR WIRING (saveUndo() now exists)
+// 6. ABSTRACT MODE — fluid organic blob
 // ============================================================
-document.querySelectorAll('.ws-btn').forEach(b => {
-    b.addEventListener('click', () => {
-        if (b.dataset.workshop === currentWorkshop) return;
-        saveUndo();
-        applyWorkshop(b.dataset.workshop);
-    });
-});
+let abstractAnimating = false;
+let abstractTime = 0;
+let abstractRestPositions = null;
+
+function initAbstractBlob() {
+    const geo = new THREE.SphereGeometry(1.3, 64, 48).toNonIndexed();
+    geo.computeVertexNormals();
+    const pos = geo.attributes.position;
+
+    // Organic lava-lamp deformation
+    for (let i = 0; i < pos.count; i++) {
+        let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+        const len = Math.sqrt(x * x + y * y + z * z) || 1;
+        const nx = x / len, ny = y / len, nz = z / len;
+        y *= 1.4; // elongate vertically
+        const lump1 = Math.sin(nx * 3.2 + 0.5) * Math.cos(ny * 2.1 + 1.2) * Math.sin(nz * 2.8) * 0.15;
+        const lump2 = Math.sin(nx * 5.1) * Math.cos(ny * 4.3 + 2.1) * Math.cos(nz * 3.7) * 0.07;
+        const waist = 1.0 - Math.pow(Math.abs(ny), 2.5) * 0.15;
+        const r = (len + lump1 + lump2) * waist;
+        pos.setXYZ(i, nx * r, y + ny * lump1 * 0.5, nz * r);
+    }
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+
+    if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+    mesh = new THREE.Mesh(geo, material);
+    scene.add(mesh);
+    refreshWireframe();
+
+    abstractRestPositions = new Float32Array(mesh.geometry.attributes.position.array);
+
+    // Apply gradient colors
+    applyBlobGradient();
+}
+
+function applyBlobGradient() {
+    if (!mesh) return;
+    const pos = mesh.geometry.attributes.position;
+    const colors = new Float32Array(pos.count * 3);
+    let yMin = Infinity, yMax = -Infinity;
+    for (let i = 0; i < pos.count; i++) {
+        const y = pos.getY(i);
+        if (y < yMin) yMin = y;
+        if (y > yMax) yMax = y;
+    }
+    const yRange = Math.max(yMax - yMin, 0.01);
+    const ur = material.color.r, ug = material.color.g, ub = material.color.b;
+    for (let i = 0; i < pos.count; i++) {
+        const t = (pos.getY(i) - yMin) / yRange;
+        // pink → lavender → baby blue
+        let r, g, b;
+        if (t < 0.5) {
+            const s = t * 2;
+            r = 0.95 + (0.78 - 0.95) * s;
+            g = 0.60 + (0.65 - 0.60) * s;
+            b = 0.70 + (0.90 - 0.70) * s;
+        } else {
+            const s = (t - 0.5) * 2;
+            r = 0.78 + (0.60 - 0.78) * s;
+            g = 0.65 + (0.78 - 0.65) * s;
+            b = 0.90 + (0.95 - 0.90) * s;
+        }
+        colors[i * 3] = r * 0.6 + ur * 0.4;
+        colors[i * 3 + 1] = g * 0.6 + ug * 0.4;
+        colors[i * 3 + 2] = b * 0.6 + ub * 0.4;
+    }
+    mesh.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    material.vertexColors = true;
+    material.needsUpdate = true;
+}
+
+function abstractAnimate() {
+    if (!abstractAnimating || !mesh || !abstractRestPositions) return;
+    abstractTime += 0.012;
+    const pos = mesh.geometry.attributes.position;
+    const rest = abstractRestPositions;
+    for (let i = 0; i < pos.count; i++) {
+        const rx = rest[i * 3], ry = rest[i * 3 + 1], rz = rest[i * 3 + 2];
+        const len = Math.sqrt(rx * rx + ry * ry + rz * rz) || 1;
+        const nx = rx / len, ny = ry / len, nz = rz / len;
+        const wave1 = Math.sin(abstractTime * 1.2 + ny * 3.0 + nx * 2.0) * 0.045;
+        const wave2 = Math.sin(abstractTime * 2.2 + rx * 4.0 + rz * 3.5) * Math.cos(abstractTime * 1.5 + ry * 3.0) * 0.025;
+        const wave3 = Math.sin(abstractTime * 3.8 + nx * 7.0 + nz * 5.5) * Math.cos(abstractTime * 2.8 + ny * 8.0) * 0.012;
+        const tangent = Math.sin(abstractTime * 1.0 + ny * 4.0) * 0.015;
+        const breathe = wave1 + wave2 + wave3;
+        pos.setXYZ(i,
+            rx + nx * breathe + nz * tangent,
+            ry + ny * breathe,
+            rz + nz * breathe - nx * tangent
+        );
+    }
+    pos.needsUpdate = true;
+    safeComputeNormals();
+}
+
+// Abstract mouse interaction: drag to mold, shift+drag to stretch
+let abstractDragging = false;
+let abstractDragStart = null;
+let abstractHitPoint = null;
 
 // ============================================================
-// 11. OBJECT SCANNING — webcam silhouette → 3D voxel mesh
+// 7. SKETCH MODE — 2D canvas with brush textures
 // ============================================================
-// Approach: capture a frame, extract the foreground silhouette by comparing each
-// pixel's color to the background color (sampled from the corners), downsample
-// the binary mask to a coarse grid, then build a voxel-style mesh from the grid.
-// The result becomes the active sculptable mesh — user can refine in any workshop.
+let sketchCtx = null;
+let sketchColor = '#333333';
+let sketchTool = 'pencil';
+let isSketchDrawing = false;
+let lastSketchPt = null;
+const sketchUndoStack = [];
+const SKETCH_UNDO_MAX = 30;
 
-(function setupScan() {
-    const scanBtn = document.getElementById('scan-btn');
+function saveSketchUndo() {
+    const canvas = document.getElementById('sketch-canvas');
+    if (!canvas) return;
+    sketchUndoStack.push(canvas.toDataURL());
+    if (sketchUndoStack.length > SKETCH_UNDO_MAX) sketchUndoStack.shift();
+}
 
-    // Build modal lazily
-    const modal = document.createElement('div');
-    modal.id = 'scan-modal';
-    modal.innerHTML = `
-        <div id="scan-modal-inner">
-            <h2>📷 Object Scanner</h2>
-            <p>Hold a real object in front of the camera against a plain, uniformly-lit background.
-               Move the object closer to the camera and keep it centered. Adjust the threshold so only the object stays pink in the preview, then capture.</p>
-            <div id="scan-video-wrap">
-                <video id="scan-video" autoplay playsinline muted></video>
-                <canvas id="scan-preview"></canvas>
-                <canvas id="scan-frame"></canvas>
-                <div id="scan-guide">
-                    <span>Keep the object and both hands inside this frame</span>
-                </div>
-            </div>
-            <div id="scan-threshold-row">
-                <label for="scan-threshold">Threshold</label>
-                <input type="range" id="scan-threshold" min="10" max="120" step="2" value="45">
-                <span id="scan-threshold-v">45</span>
-            </div>
-            <div id="scan-controls">
-                <button id="scan-capture" class="primary">📸 Capture & Build Mesh</button>
-                <button id="scan-close">Close</button>
-            </div>
-            <div id="scan-status">Ready.</div>
-        </div>
-    `;
-    document.body.appendChild(modal);
+function undoSketch() {
+    if (!sketchUndoStack.length) { setCommandStatus('Nothing to undo in sketch'); return; }
+    const canvas = document.getElementById('sketch-canvas');
+    if (!canvas || !sketchCtx) return;
+    const dataURL = sketchUndoStack.pop();
+    const img = new Image();
+    img.onload = () => {
+        sketchCtx.clearRect(0, 0, canvas.width, canvas.height);
+        sketchCtx.drawImage(img, 0, 0);
+    };
+    img.src = dataURL;
+    setCommandStatus(`Sketch undo (${sketchUndoStack.length} left)`);
+}
 
-    const scanVideo = modal.querySelector('#scan-video');
-    const scanPreview = modal.querySelector('#scan-preview');
-    const scanFrame = modal.querySelector('#scan-frame');
-    const scanGuide = modal.querySelector('#scan-guide');
-    const scanThresh = modal.querySelector('#scan-threshold');
-    const scanThreshV = modal.querySelector('#scan-threshold-v');
-    const scanStatus = modal.querySelector('#scan-status');
-    const scanCapture = modal.querySelector('#scan-capture');
-    const scanClose = modal.querySelector('#scan-close');
+const SKETCH_TOOLS = {
+    pencil:  { size: 3,  opacity: 0.85, blur: 0,   cap: 'round',  composite: 'source-over', jitter: 0.3 },
+    pen:     { size: 2,  opacity: 1.0,  blur: 0,   cap: 'round',  composite: 'source-over', jitter: 0 },
+    marker:  { size: 12, opacity: 0.6,  blur: 0,   cap: 'round',  composite: 'source-over', jitter: 0 },
+    crayon:  { size: 8,  opacity: 0.55, blur: 1,   cap: 'round',  composite: 'source-over', jitter: 1.5 },
+    pastel:  { size: 14, opacity: 0.35, blur: 3,   cap: 'round',  composite: 'source-over', jitter: 2.0 },
+    acrylic: { size: 10, opacity: 0.9,  blur: 0.5, cap: 'square', composite: 'source-over', jitter: 0.5 },
+    eraser:  { size: 20, opacity: 1.0,  blur: 0,   cap: 'round',  composite: 'destination-out', jitter: 0 },
+};
 
-    // Verify guide is visible
-    if (scanGuide) {
-        setTimeout(() => {
-            const rect = scanGuide.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) {
-                scanGuide.style.opacity = '1';
-                scanGuide.style.visibility = 'visible';
-                scanGuide.style.display = 'block';
-            }
-        }, 100);
+function initSketchCanvas() {
+    const canvas = document.getElementById('sketch-canvas');
+    if (!canvas) return;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    sketchCtx = canvas.getContext('2d');
+    sketchCtx.fillStyle = '#ffffff';
+    sketchCtx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function sketchStroke(x, y) {
+    if (!sketchCtx) return;
+    const tool = SKETCH_TOOLS[sketchTool] || SKETCH_TOOLS.pencil;
+    sketchCtx.save();
+    sketchCtx.globalAlpha = tool.opacity;
+    sketchCtx.globalCompositeOperation = tool.composite;
+    sketchCtx.lineCap = tool.cap;
+    sketchCtx.lineJoin = 'round';
+    sketchCtx.lineWidth = tool.size;
+    sketchCtx.strokeStyle = sketchTool === 'eraser' ? '#ffffff' : sketchColor;
+    if (tool.blur > 0) sketchCtx.filter = `blur(${tool.blur}px)`;
+    const jx = tool.jitter ? (Math.random() - 0.5) * tool.jitter : 0;
+    const jy = tool.jitter ? (Math.random() - 0.5) * tool.jitter : 0;
+    sketchCtx.beginPath();
+    if (lastSketchPt) {
+        sketchCtx.moveTo(lastSketchPt.x, lastSketchPt.y);
+        sketchCtx.lineTo(x + jx, y + jy);
+    } else {
+        sketchCtx.moveTo(x + jx, y + jy);
+        sketchCtx.lineTo(x + jx + 0.5, y + jy + 0.5);
     }
+    sketchCtx.stroke();
+    sketchCtx.restore();
+    lastSketchPt = { x: x + jx, y: y + jy };
+}
 
-    let scanStream = null;
-    let previewRAF = 0;
-    let threshold = 45;
+// Sketch SVG export with laser-cut templates
+function exportSketchSVG(template = 'custom') {
+    if (!sketchCtx) return;
+    const canvas = document.getElementById('sketch-canvas');
+    const dataURL = canvas.toDataURL('image/png');
 
-    scanThresh.addEventListener('input', e => {
-        threshold = parseInt(e.target.value, 10);
-        scanThreshV.textContent = String(threshold);
-    });
+    // Template dimensions (mm for laser cut)
+    const templates = {
+        custom:   { w: canvas.width, h: canvas.height, label: 'Custom' },
+        card:     { w: 350, h: 200, label: 'Card (3.5x2in)' },
+        keychain: { w: 60,  h: 60,  label: 'Keychain (60mm)' },
+        coaster:  { w: 100, h: 100, label: 'Coaster (100mm)' },
+        bookmark: { w: 50,  h: 180, label: 'Bookmark (50x180mm)' },
+    };
+    const t = templates[template] || templates.custom;
 
-    scanBtn.addEventListener('click', () => openScanner());
-    scanClose.addEventListener('click', () => closeScanner());
-    scanCapture.addEventListener('click', () => doCapture());
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="${t.w}mm" height="${t.h}mm" viewBox="0 0 ${t.w} ${t.h}">
+  <title>Laser Cut - ${t.label}</title>
+  <!-- Cut line (red = cut) -->
+  <rect x="0" y="0" width="${t.w}" height="${t.h}" fill="none" stroke="red" stroke-width="0.1"/>
+  ${template === 'keychain' ? `<circle cx="${t.w / 2}" cy="8" r="3" fill="none" stroke="red" stroke-width="0.1"/>` : ''}
+  <!-- Sketch artwork -->
+  <image href="${dataURL}" x="2" y="2" width="${t.w - 4}" height="${t.h - 4}" preserveAspectRatio="xMidYMid meet"/>
+</svg>`;
 
-    async function openScanner() {
-        modal.classList.add('open');
-        scanStatus.textContent = 'Starting camera…';
-        try {
-            scanStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-            scanVideo.srcObject = scanStream;
-            await scanVideo.play();
-            scanPreview.width = scanVideo.videoWidth || 640;
-            scanPreview.height = scanVideo.videoHeight || 480;
-            scanFrame.width = scanPreview.width;
-            scanFrame.height = scanPreview.height;
-            scanStatus.textContent = 'Adjust the threshold so the object glows pink, then capture.';
-            startPreviewLoop();
-        } catch (err) {
-            scanStatus.textContent = 'Camera error: ' + (err.message || err);
+    const blob = new Blob([svg], { type: 'image/svg+xml' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `sketch-${template}.svg`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setCommandStatus(`Exported ${t.label} as SVG`);
+}
+
+// ============================================================
+// 8. GESTURE DETECTION SYSTEM
+// ============================================================
+const GESTURE_SMOOTHING = 0.3; // EMA alpha
+const GESTURE_BUFFER_SIZE = 10;
+const PINCH_THRESHOLD = 0.09;
+const DEAD_ZONE = 0.005;
+const MODE_LOCK_MS = 150;
+const CUPPED_HOLD_MS = 500;
+
+// Engagement zone — ignore hands that are incidental (resting, scratching, etc.)
+const ENGAGE_ZONE_MARGIN = 0.12;
+const ENGAGE_MIN_HAND_SIZE = 0.07;
+
+let handLandmarker = null;
+let handTrackingActive = false;
+let isDebug = false;
+let lastGestureTime = 0;
+let currentGesture = null;
+let gestureLockedUntil = 0;
+
+// Smoothed landmark buffer (pre-allocated)
+const smoothedLandmarks = [new Array(21).fill(null).map(() => ({ x: 0, y: 0, z: 0 })),
+                           new Array(21).fill(null).map(() => ({ x: 0, y: 0, z: 0 }))];
+let landmarkInited = [false, false];
+
+// Rolling motion buffer
+const motionBuffer = [[], []]; // per hand, last N frames of wrist position
+
+function smoothLandmark(handIdx, lmIdx, raw) {
+    const s = smoothedLandmarks[handIdx][lmIdx];
+    if (!landmarkInited[handIdx]) {
+        s.x = raw.x; s.y = raw.y; s.z = raw.z;
+        return s;
+    }
+    const a = GESTURE_SMOOTHING;
+    s.x = s.x * (1 - a) + raw.x * a;
+    s.y = s.y * (1 - a) + raw.y * a;
+    s.z = s.z * (1 - a) + raw.z * a;
+    return s;
+}
+
+function processLandmarks(rawHands) {
+    const result = [];
+    for (let h = 0; h < Math.min(rawHands.length, 2); h++) {
+        const hand = [];
+        for (let i = 0; i < 21; i++) {
+            hand.push(smoothLandmark(h, i, rawHands[h][i]));
         }
-    }
-    function closeScanner() {
-        cancelAnimationFrame(previewRAF);
-        if (scanStream) {
-            scanStream.getTracks().forEach(t => t.stop());
-            scanStream = null;
-        }
-        scanVideo.srcObject = null;
-        modal.classList.remove('open');
-    }
+        landmarkInited[h] = true;
+        result.push(hand);
 
-    // Grab background color estimate from the four corners of the captured frame.
-    function sampleBackground(imgData) {
-        const { data, width, height } = imgData;
-        const samples = [];
-        const sz = 8;
-        for (const [cx, cy] of [[0,0],[width-sz,0],[0,height-sz],[width-sz,height-sz]]) {
-            for (let dy = 0; dy < sz; dy++) for (let dx = 0; dx < sz; dx++) {
-                const i = ((cy + dy) * width + (cx + dx)) * 4;
-                samples.push([data[i], data[i+1], data[i+2]]);
-            }
-        }
-        let r=0, g=0, b=0;
-        for (const s of samples) { r += s[0]; g += s[1]; b += s[2]; }
-        return [r / samples.length, g / samples.length, b / samples.length];
+        // Update motion buffer
+        motionBuffer[h].push({ x: hand[0].x, y: hand[0].y, z: hand[0].z, t: performance.now() });
+        if (motionBuffer[h].length > GESTURE_BUFFER_SIZE) motionBuffer[h].shift();
     }
+    return result;
+}
 
-    function getScanFocusRegion(videoEl, width, height) {
-        if (!handLandmarker || !videoEl || videoEl.readyState < 2) return null;
-        try {
-            const detected = handLandmarker.detectForVideo(videoEl, performance.now());
-            if (!detected || !detected.landmarks || !detected.landmarks.length) return null;
-            let minX = 1, minY = 1, maxX = 0, maxY = 0;
-            for (const hand of detected.landmarks) {
-                for (const lm of hand) {
-                    if (lm.x < minX) minX = lm.x;
-                    if (lm.y < minY) minY = lm.y;
-                    if (lm.x > maxX) maxX = lm.x;
-                    if (lm.y > maxY) maxY = lm.y;
+// --- Gesture classifiers ---
+function dist3D(a, b) {
+    return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2);
+}
+
+// Check if a hand is in the valid interaction zone (basic spatial filter)
+function isHandInZone(hand) {
+    const wrist = hand[0];
+    const midMCP = hand[9];
+    const inZoneX = wrist.x > ENGAGE_ZONE_MARGIN && wrist.x < (1 - ENGAGE_ZONE_MARGIN);
+    const inZoneY = wrist.y > ENGAGE_ZONE_MARGIN && wrist.y < (1 - ENGAGE_ZONE_MARGIN);
+    if (!inZoneX || !inZoneY) return false;
+    const handSize = Math.hypot(midMCP.x - wrist.x, midMCP.y - wrist.y);
+    if (handSize < ENGAGE_MIN_HAND_SIZE) return false;
+    return true;
+}
+
+function isPinch(hand) {
+    // Use 2D distance only (X,Y) — Z from MediaPipe is noisy
+    return Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y) < PINCH_THRESHOLD;
+}
+
+function isFist(hand) {
+    // All fingertips close to palm (wrist)
+    const palm = hand[0];
+    const tips = [hand[8], hand[12], hand[16], hand[20]];
+    return tips.every(t => dist3D(t, palm) < 0.12);
+}
+
+function isOpenPalm(hand) {
+    const palm = hand[0];
+    const tips = [hand[4], hand[8], hand[12], hand[16], hand[20]];
+    return tips.every(t => dist3D(t, palm) > 0.12);
+}
+
+function isCupped(hand) {
+    // Fingertips curled: MCPs farther from palm center than tips
+    const palm = hand[0];
+    const mcps = [hand[5], hand[9], hand[13], hand[17]];
+    const tips = [hand[8], hand[12], hand[16], hand[20]];
+    let curledCount = 0;
+    for (let i = 0; i < 4; i++) {
+        if (dist3D(mcps[i], palm) > dist3D(tips[i], palm) * 0.9) curledCount++;
+    }
+    return curledCount >= 3 && !isPinch(hand) && !isFist(hand);
+}
+
+function isPointing(hand) {
+    // Index extended, others curled
+    const palm = hand[0];
+    const indexExt = dist3D(hand[8], palm) > 0.15;
+    const othersCurled = [hand[12], hand[16], hand[20]].every(t => dist3D(t, palm) < 0.12);
+    return indexExt && othersCurled && !isPinch(hand);
+}
+
+function isLShape(hand) {
+    // Thumb + index extended at ~90°, others curled
+    const thumbExt = dist3D(hand[4], hand[2]) > 0.06;
+    const indexExt = dist3D(hand[8], hand[5]) > 0.06;
+    const othersCurled = [hand[12], hand[16], hand[20]].every(t => dist3D(t, hand[0]) < 0.12);
+    if (!thumbExt || !indexExt || !othersCurled) return false;
+    // Check angle between thumb and index directions
+    const thumbDir = { x: hand[4].x - hand[2].x, y: hand[4].y - hand[2].y };
+    const indexDir = { x: hand[8].x - hand[5].x, y: hand[8].y - hand[5].y };
+    const dot = thumbDir.x * indexDir.x + thumbDir.y * indexDir.y;
+    const mag = Math.sqrt(thumbDir.x ** 2 + thumbDir.y ** 2) * Math.sqrt(indexDir.x ** 2 + indexDir.y ** 2);
+    const angle = Math.acos(Math.max(-1, Math.min(1, dot / (mag || 1))));
+    return angle > Math.PI / 4 && angle < Math.PI * 3 / 4; // 45° to 135°
+}
+
+function classifyGesture(hand) {
+    if (isPinch(hand)) return 'pinch';
+    if (isFist(hand)) return 'fist';
+    if (isPointing(hand)) return 'point';
+    if (isCupped(hand)) return 'cupped';
+    if (isLShape(hand)) return 'lshape';
+    if (isOpenPalm(hand)) return 'palm';
+    return null;
+}
+
+function getMotionVector(handIdx) {
+    const buf = motionBuffer[handIdx];
+    if (buf.length < 3) return { x: 0, y: 0, z: 0, magnitude: 0 };
+    const recent = buf[buf.length - 1];
+    const old = buf[buf.length - 3];
+    const dx = recent.x - old.x;
+    const dy = recent.y - old.y;
+    const dz = recent.z - old.z;
+    return { x: dx, y: dy, z: dz, magnitude: Math.sqrt(dx * dx + dy * dy + dz * dz) };
+}
+
+// ============================================================
+// 9. GESTURE → COMMAND MAPPING
+// ============================================================
+// State for gesture-driven operations
+let gestureState = {
+    lastPinchPos: [null, null],    // per hand
+    lastPalmPos: [null, null],     // per hand — palm center position for rotation
+    twoHandDist: null,
+    cuppedHoldStart: null,
+    addShapePreview: null,
+    addShapeScale: 0.3,
+    addShapeScaleAtCupStart: 0.5,  // scale when cupped resize began
+    lastGestures: [null, null],
+    pinchSubMode: null,            // 'translate' | 'extrude' | null — locked once determined
+    pinchSubModeFrames: 0,         // frames since pinch started (for initial direction sampling)
+    pinchAccumLateral: 0,          // accumulated lateral movement during sampling
+    pinchAccumDepth: 0,            // accumulated depth movement during sampling
+    scaleUndoArmed: false,
+    bevelUndoArmed: false,
+    moldUndoArmed: false,
+    rotateUndoArmed: false,
+};
+
+// Smooth rotation state — EMA-filtered for fluid feel
+let smoothRotVelX = 0;
+let smoothRotVelY = 0;
+const ROT_SMOOTHING = 0.45;
+let ROT_SENSITIVITY = 8.0;
+let ROT_DAMPING = 0.92;
+const ROT_MIN_DELTA = 0.0005;
+
+// Smooth pinch state
+let smoothTransVelX = 0;
+let smoothTransVelY = 0;
+let smoothExtrudeVel = 0;
+const PINCH_SMOOTHING = 0.5;
+let TRANSLATE_SENSITIVITY = 5.0;
+const EXTRUDE_SENSITIVITY = 4.0;
+const TRANSLATE_DAMPING = 0.85;
+const PINCH_SAMPLE_FRAMES = 6;
+const PINCH_LOCK_DEPTH_RATIO = 0.5;
+
+// Gesture transition guard
+const GESTURE_SWITCH_FRAMES = 2;  // lowered from 4 for faster response
+let gestureConfirmBuffer = [null, null]; // per hand: { gesture, count }
+let lastConfirmedGesture = [null, null];
+
+function confirmGesture(handIdx, rawGesture) {
+    const buf = gestureConfirmBuffer[handIdx];
+    if (buf && buf.gesture === rawGesture) {
+        buf.count++;
+    } else {
+        gestureConfirmBuffer[handIdx] = { gesture: rawGesture, count: 1 };
+    }
+    // Only switch if we've seen the new gesture for enough frames
+    if (gestureConfirmBuffer[handIdx].count >= GESTURE_SWITCH_FRAMES) {
+        lastConfirmedGesture[handIdx] = rawGesture;
+        return rawGesture;
+    }
+    // Stick with the last confirmed gesture to prevent flicker
+    return lastConfirmedGesture[handIdx];
+}
+
+function handleGestures(hands) {
+    if (!hands.length || !mesh) return;
+    const now = performance.now();
+    if (now < gestureLockedUntil) return;
+
+    const rawGestures = hands.map(h => classifyGesture(h));
+    // Apply hysteresis — requires N consecutive frames before switching gesture
+    const gestures = rawGestures.map((g, i) => confirmGesture(i, g));
+
+    // === ADD SHAPE MODE — dual-hand support ===
+    // In add-shape mode: simplified — every hand simultaneously:
+    // - Positions preview by where it is on screen
+    // - Hand openness controls scale
+    // - Pinch (thumb+index touch) = place
+    // Second hand palm = rotate object
+    if (addShapeMode && currentAppMode === 'model') {
+        const hand = hands[0];
+        const wrist = hand[0];
+        const thumbTip = hand[4], indexTip = hand[8];
+        const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+
+        // --- PINCH = PLACE (thumb touches index) ---
+        if (pinchDist < 0.035) {
+            if (!gestureState._pinchPlaceStart) {
+                gestureState._pinchPlaceStart = now;
+            } else if (now - gestureState._pinchPlaceStart > 250) {
+                if (addShapeVisible) {
+                    confirmAddShape();
+                    gestureLockedUntil = now + 600;
                 }
+                addShapeBaseHandScale = null;
+                gestureState._smoothSpan = null;
+                gestureState._pinchPlaceStart = null;
+                currentGesture = 'addshape-place';
+                return;
             }
-            const padX = 0.18;
-            const padY = 0.22;
-            return {
-                x0: Math.max(0, Math.floor((minX - padX) * width)),
-                y0: Math.max(0, Math.floor((minY - padY) * height)),
-                x1: Math.min(width - 1, Math.ceil((maxX + padX) * width)),
-                y1: Math.min(height - 1, Math.ceil((maxY + padY) * height)),
-            };
-        } catch (err) {
-            return null;
-        }
-    }
-
-    // Build foreground mask by scoring pixels against the estimated background.
-    // Center pixels are weighted higher so distant background is less likely to survive.
-    function buildMask(imgData, thresh, focusRegion = null) {
-        const { data, width, height } = imgData;
-        const [br, bg, bb] = sampleBackground(imgData);
-        const scores = new Float32Array(width * height);
-        const left = Math.floor(width * 0.12);
-        const right = Math.floor(width * 0.88);
-        const top = Math.floor(height * 0.10);
-        const bottom = Math.floor(height * 0.92);
-        const roi = focusRegion || {
-            x0: Math.floor(width * 0.18),
-            y0: Math.floor(height * 0.18),
-            x1: Math.floor(width * 0.82),
-            y1: Math.floor(height * 0.84),
-        };
-        const cx = width * 0.5;
-        const cy = height * 0.52;
-        const maxR = Math.hypot(width * 0.5, height * 0.5);
-        let sum = 0;
-        let sum2 = 0;
-        let count = 0;
-
-        for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-            const y = (p / width) | 0;
-            const x = p - y * width;
-            if (x < left || x > right || y < top || y > bottom) continue;
-            if (x < roi.x0 || x > roi.x1 || y < roi.y0 || y > roi.y1) continue;
-            const dr = data[i] - br, dg = data[i+1] - bg, db = data[i+2] - bb;
-            const colorDist = Math.hypot(dr, dg, db);
-            const dx = x - cx;
-            const dy = y - cy;
-            const radial = Math.min(1, Math.hypot(dx, dy) / maxR);
-            const centerWeight = 1 - Math.pow(radial, 1.9);
-            const score = colorDist * (0.55 + centerWeight * 0.85);
-            scores[p] = score;
-            sum += score;
-            sum2 += score * score;
-            count++;
-        }
-
-        const mean = count ? (sum / count) : 0;
-        const variance = count ? Math.max(0, sum2 / count - mean * mean) : 0;
-        const std = Math.sqrt(variance);
-        const baseThreshold = mean + std * 0.55;
-        const manualBias = Math.max(0.8, Math.min(1.7, thresh / 45));
-        const adaptiveThreshold = baseThreshold * manualBias;
-
-        const mask = new Uint8Array(width * height);
-        for (let p = 0; p < scores.length; p++) {
-            if (scores[p] > adaptiveThreshold) mask[p] = 1;
-        }
-        return mask;
-    }
-
-    function smoothMask(mask, width, height) {
-        const out = new Uint8Array(width * height);
-        for (let y = 1; y < height - 1; y++) {
-            for (let x = 1; x < width - 1; x++) {
-                let count = 0;
-                for (let oy = -1; oy <= 1; oy++) {
-                    for (let ox = -1; ox <= 1; ox++) {
-                        count += mask[(y + oy) * width + (x + ox)];
-                    }
-                }
-                out[y * width + x] = count >= 5 ? 1 : 0;
-            }
-        }
-        return out;
-    }
-
-    function erodeMask(mask, width, height) {
-        const out = new Uint8Array(width * height);
-        for (let y = 1; y < height - 1; y++) {
-            for (let x = 1; x < width - 1; x++) {
-                let keep = 1;
-                for (let oy = -1; oy <= 1 && keep; oy++) {
-                    for (let ox = -1; ox <= 1; ox++) {
-                        if (!mask[(y + oy) * width + (x + ox)]) { keep = 0; break; }
-                    }
-                }
-                out[y * width + x] = keep;
-            }
-        }
-        return out;
-    }
-
-    // Keep only the largest connected component (rejects tiny background-noise blobs).
-    function keepLargestComponent(mask, width, height) {
-        const visited = new Uint8Array(width * height);
-        const out = new Uint8Array(width * height);
-        let bestSize = 0;
-        const stack = new Int32Array(width * height);
-        let stackTop = 0;
-        let bestStart = -1;
-        for (let i = 0; i < mask.length; i++) {
-            if (!mask[i] || visited[i]) continue;
-            // Flood fill
-            stackTop = 0;
-            stack[stackTop++] = i;
-            visited[i] = 1;
-            const region = [];
-            while (stackTop > 0) {
-                const idx = stack[--stackTop];
-                region.push(idx);
-                const x = idx % width, y = (idx / width) | 0;
-                const nbrs = [];
-                if (x > 0) nbrs.push(idx - 1);
-                if (x < width-1) nbrs.push(idx + 1);
-                if (y > 0) nbrs.push(idx - width);
-                if (y < height-1) nbrs.push(idx + width);
-                for (const n of nbrs) {
-                    if (mask[n] && !visited[n]) { visited[n] = 1; stack[stackTop++] = n; }
-                }
-            }
-            if (region.length > bestSize) {
-                bestSize = region.length;
-                bestStart = i;
-                // Lazily fill `out` only for the eventual best — re-flood at end.
-            }
-        }
-        if (bestStart < 0) return out;
-        // Re-flood from bestStart (cheaper than tracking every region's pixels).
-        const visited2 = new Uint8Array(width * height);
-        stackTop = 0;
-        stack[stackTop++] = bestStart;
-        visited2[bestStart] = 1;
-        while (stackTop > 0) {
-            const idx = stack[--stackTop];
-            out[idx] = 1;
-            const x = idx % width, y = (idx / width) | 0;
-            const nbrs = [];
-            if (x > 0) nbrs.push(idx - 1);
-            if (x < width-1) nbrs.push(idx + 1);
-            if (y > 0) nbrs.push(idx - width);
-            if (y < height-1) nbrs.push(idx + width);
-            for (const n of nbrs) {
-                if (mask[n] && !visited2[n]) { visited2[n] = 1; stack[stackTop++] = n; }
-            }
-        }
-        return out;
-    }
-
-    // Downsample mask to coarse grid for a sculptable triangle count.
-    function downsampleMask(mask, w, h, targetW) {
-        const aspect = h / w;
-        const dw = targetW;
-        const dh = Math.max(8, Math.round(targetW * aspect));
-        const out = new Uint8Array(dw * dh);
-        const sx = w / dw, sy = h / dh;
-        for (let dy = 0; dy < dh; dy++) {
-            for (let dx = 0; dx < dw; dx++) {
-                const x0 = Math.floor(dx * sx), x1 = Math.floor((dx+1) * sx);
-                const y0 = Math.floor(dy * sy), y1 = Math.floor((dy+1) * sy);
-                let on = 0, total = 0;
-                for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) {
-                    if (mask[yy * w + xx]) on++;
-                    total++;
-                }
-                out[dy * dw + dx] = (on / total > 0.5) ? 1 : 0;
-            }
-        }
-        return { mask: out, w: dw, h: dh };
-    }
-
-    // Build a voxel-style 3D mesh by walking each foreground cell of the coarse mask.
-    function buildVoxelGeometry(mask, w, h) {
-        const verts = [];
-        const norms = [];
-        const fg = (x, y) => x >= 0 && y >= 0 && x < w && y < h && mask[y * w + x];
-
-        // Compute mask centroid + scale so the resulting mesh fits a ~2-unit box.
-        let cx = 0, cy = 0, n = 0;
-        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-            if (mask[y*w+x]) { cx += x + 0.5; cy += y + 0.5; n++; }
-        }
-        if (!n) return null;
-        cx /= n; cy /= n;
-        const maxDim = Math.max(w, h);
-        const sxy = 2.5 / maxDim;
-        const depth = (Math.min(w, h) * sxy) * 0.45;
-        const halfD = depth / 2;
-
-        function addQuad(p1, p2, p3, p4, nx, ny, nz) {
-            verts.push(p1[0],p1[1],p1[2], p2[0],p2[1],p2[2], p3[0],p3[1],p3[2],
-                       p1[0],p1[1],p1[2], p3[0],p3[1],p3[2], p4[0],p4[1],p4[2]);
-            for (let k = 0; k < 6; k++) norms.push(nx, ny, nz);
-        }
-
-        for (let y = 0; y < h; y++) {
-            for (let x = 0; x < w; x++) {
-                if (!mask[y*w+x]) continue;
-                const wx0 = (x       - cx) * sxy;
-                const wx1 = (x + 1   - cx) * sxy;
-                const wy0 = -(y      - cy) * sxy; // image y grows downward; world y grows upward
-                const wy1 = -(y + 1  - cy) * sxy;
-                // Front face (+z)
-                addQuad([wx0, wy1, halfD], [wx1, wy1, halfD], [wx1, wy0, halfD], [wx0, wy0, halfD], 0,0,1);
-                // Back face (-z)
-                addQuad([wx0, wy0, -halfD], [wx1, wy0, -halfD], [wx1, wy1, -halfD], [wx0, wy1, -halfD], 0,0,-1);
-                // Side walls only where neighbour is empty
-                if (!fg(x-1, y)) addQuad([wx0, wy1, -halfD], [wx0, wy1, halfD], [wx0, wy0, halfD], [wx0, wy0, -halfD], -1,0,0);
-                if (!fg(x+1, y)) addQuad([wx1, wy0, -halfD], [wx1, wy0, halfD], [wx1, wy1, halfD], [wx1, wy1, -halfD], 1,0,0);
-                if (!fg(x, y-1)) addQuad([wx0, wy0, -halfD], [wx0, wy0, halfD], [wx1, wy0, halfD], [wx1, wy0, -halfD], 0,1,0);
-                if (!fg(x, y+1)) addQuad([wx1, wy1, -halfD], [wx1, wy1, halfD], [wx0, wy1, halfD], [wx0, wy1, -halfD], 0,-1,0);
-            }
-        }
-
-        const g = new THREE.BufferGeometry();
-        g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
-        g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(norms), 3));
-        g.computeVertexNormals();
-        return g;
-    }
-
-    function drawScanFrameOverlay(ctx, width, height, focusRegion) {
-        const frame = focusRegion || {
-            x0: Math.floor(width * 0.18),
-            y0: Math.floor(height * 0.18),
-            x1: Math.floor(width * 0.82),
-            y1: Math.floor(height * 0.84),
-        };
-        ctx.clearRect(0, 0, width, height);
-        ctx.fillStyle = 'rgba(15, 18, 20, 0.18)';
-        ctx.fillRect(0, 0, width, height);
-        ctx.clearRect(frame.x0, frame.y0, frame.x1 - frame.x0, frame.y1 - frame.y0);
-        ctx.strokeStyle = 'rgba(255, 130, 200, 0.95)';
-        ctx.lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.006));
-        ctx.strokeRect(frame.x0, frame.y0, frame.x1 - frame.x0, frame.y1 - frame.y0);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-        ctx.lineWidth = Math.max(1, Math.round(Math.min(width, height) * 0.0035));
-        const corner = Math.max(16, Math.round(Math.min(width, height) * 0.04));
-        const corners = [
-            [frame.x0, frame.y0, 1, 1],
-            [frame.x1, frame.y0, -1, 1],
-            [frame.x0, frame.y1, 1, -1],
-            [frame.x1, frame.y1, -1, -1],
-        ];
-        for (const [x, y, sx, sy] of corners) {
-            ctx.beginPath();
-            ctx.moveTo(x, y);
-            ctx.lineTo(x + sx * corner, y);
-            ctx.moveTo(x, y);
-            ctx.lineTo(x, y + sy * corner);
-            ctx.stroke();
-        }
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
-        ctx.font = `${Math.max(12, Math.round(Math.min(width, height) * 0.03))}px sans-serif`;
-        ctx.fillText('Keep object and hands inside the frame', frame.x0 + 12, Math.max(18, frame.y0 - 10));
-    }
-
-    function startPreviewLoop() {
-        const w = scanPreview.width, h = scanPreview.height;
-        const ctx = scanPreview.getContext('2d', { willReadFrequently: true });
-        const frameCtx = scanFrame.getContext('2d');
-        const tick = () => {
-            if (!scanStream) return;
-            // Mirror the video onto our canvas to match what user sees.
-            ctx.save();
-            ctx.translate(w, 0);
-            ctx.scale(-1, 1);
-            ctx.drawImage(scanVideo, 0, 0, w, h);
-            ctx.restore();
-            const img = ctx.getImageData(0, 0, w, h);
-            const focusRegion = getScanFocusRegion(scanVideo, w, h);
-            let mask = buildMask(img, threshold, focusRegion);
-            mask = erodeMask(mask, w, h);
-            mask = smoothMask(mask, w, h);
-            // Tint the FG pink in the preview overlay.
-            const out = ctx.createImageData(w, h);
-            for (let i = 0; i < out.data.length; i += 4) {
-                out.data[i] = 255;
-                out.data[i+1] = 255;
-                out.data[i+2] = 255;
-                out.data[i+3] = 255;
-            }
-            for (let i = 0, p = 0; i < out.data.length; i += 4, p++) {
-                if (mask[p]) {
-                    out.data[i] = 255; out.data[i+1] = 130; out.data[i+2] = 200; out.data[i+3] = 235;
-                }
-            }
-            ctx.putImageData(out, 0, 0);
-            drawScanFrameOverlay(frameCtx, w, h, focusRegion);
-            previewRAF = requestAnimationFrame(tick);
-        };
-        previewRAF = requestAnimationFrame(tick);
-    }
-
-    function doCapture() {
-        if (!scanStream) { scanStatus.textContent = 'Camera not ready.'; return; }
-        const w = scanVideo.videoWidth, h = scanVideo.videoHeight;
-        const tmp = document.createElement('canvas');
-        tmp.width = w; tmp.height = h;
-        const tctx = tmp.getContext('2d');
-        tctx.save(); tctx.translate(w, 0); tctx.scale(-1, 1);
-        tctx.drawImage(scanVideo, 0, 0, w, h);
-        tctx.restore();
-        const img = tctx.getImageData(0, 0, w, h);
-        scanStatus.textContent = 'Building mask…';
-        const focusRegion = getScanFocusRegion(scanVideo, w, h);
-        let mask = buildMask(img, threshold, focusRegion);
-        mask = erodeMask(mask, w, h);
-        mask = smoothMask(mask, w, h);
-        mask = keepLargestComponent(mask, w, h);
-        const fgCount = mask.reduce((a, v) => a + v, 0);
-        if (fgCount < w * h * 0.01) {
-            scanStatus.textContent = 'No object detected — try adjusting threshold.';
+            setCommandStatus('Hold pinch to place...');
+            currentGesture = 'addshape-place';
             return;
         }
-        const ds = downsampleMask(mask, w, h, 56); // ~56px wide is sculptable
-        scanStatus.textContent = `Building mesh (${ds.w}×${ds.h} grid)…`;
-        const geo = buildVoxelGeometry(ds.mask, ds.w, ds.h);
-        if (!geo) { scanStatus.textContent = 'Mesh build failed.'; return; }
+        gestureState._pinchPlaceStart = null;
 
-        // Replace active mesh with the scanned one. Save undo first so user can revert.
-        saveUndo();
-        if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
-        mesh = new THREE.Mesh(geo, material);
-        // Reset transform so scanned object appears centered.
-        mesh.position.set(0, 0, 0);
-        mesh.rotation.set(0, 0, 0);
-        mesh.scale.set(1, 1, 1);
-        refreshWireframe();
-        rebuildTopologyCache();
-        SelectionController.clear();
-        scene.add(mesh);
+        // --- POSITION preview by hand center ---
+        const palmCenter = hand[9];
+        const screenX = (1 - palmCenter.x) * innerWidth;
+        const screenY = palmCenter.y * innerHeight;
+        const ndc = new THREE.Vector2(
+            (screenX / innerWidth) * 2 - 1,
+            -(screenY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObjects([mesh]);
+        if (hits.length) {
+            const hitNorm = hits[0].face?.normal
+                ? hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize()
+                : new THREE.Vector3(0, 0, 1);
+            addShapeHitNormal.copy(hitNorm);
+            addShapeSurfaceHit.copy(hits[0].point);
+            const surfaceOffset = addShapeBaseRadius * addShapeScale * 0.35;
+            addShapePosition.copy(hits[0].point).addScaledVector(hitNorm, surfaceOffset);
+        } else {
+            const dir = new THREE.Vector3();
+            raycaster.ray.direction.normalize();
+            dir.copy(raycaster.ray.direction).multiplyScalar(4);
+            addShapePosition.copy(raycaster.ray.origin).add(dir);
+            addShapeSurfaceHit.copy(addShapePosition);
+        }
+        updateAddShapePreview(addShapePosition, addShapeScale);
 
-        scanStatus.textContent = `Done — ${(geo.attributes.position.count / 3) | 0} triangles. You can now sculpt, color, and export!`;
-        // Brief delay then close so user sees the success message.
-        setTimeout(closeScanner, 900);
+        // --- SCALE by hand openness (all fingertips avg distance from wrist) ---
+        const tips = [hand[4], hand[8], hand[12], hand[16], hand[20]];
+        let totalSpread = 0;
+        for (const tip of tips) {
+            totalSpread += Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
+        }
+        const handOpenness = totalSpread / 5;
+
+        if (gestureState._smoothSpan == null) {
+            gestureState._smoothSpan = handOpenness;
+        } else {
+            gestureState._smoothSpan = gestureState._smoothSpan * 0.3 + handOpenness * 0.7;
+        }
+        if (addShapeBaseHandScale === null) {
+            addShapeBaseHandScale = gestureState._smoothSpan;
+            gestureState._cupStartScale = addShapeScale;
+        }
+        const ratio = gestureState._smoothSpan / addShapeBaseHandScale;
+        const targetScale = Math.max(0.05, Math.min(3.0, gestureState._cupStartScale * ratio));
+        addShapeScale = addShapeScale * 0.2 + targetScale * 0.8;
+        if (addShapePreviewMesh) {
+            addShapePreviewMesh.scale.setScalar(addShapeScale);
+            recomputeAddShapePosition();
+        }
+
+        // --- SECOND HAND: rotate object ---
+        if (hands.length >= 2) {
+            const rHand = hands[1];
+            const rPalm = rHand[9];
+            if (gestureState.lastPalmPos[1]) {
+                const dx = rPalm.x - gestureState.lastPalmPos[1].x;
+                const dy = rPalm.y - gestureState.lastPalmPos[1].y;
+                if (Math.abs(dx) > ROT_MIN_DELTA || Math.abs(dy) > ROT_MIN_DELTA) {
+                    smoothRotVelY = smoothRotVelY * (1 - ROT_SMOOTHING) + (-dx * ROT_SENSITIVITY) * ROT_SMOOTHING;
+                    smoothRotVelX = smoothRotVelX * (1 - ROT_SMOOTHING) + (dy * ROT_SENSITIVITY) * ROT_SMOOTHING;
+                }
+            }
+            gestureState.lastPalmPos[1] = { x: rPalm.x, y: rPalm.y };
+        }
+
+        // --- FIST = cancel ---
+        if (gestures[0] === 'fist') {
+            exitAddShapeMode();
+            currentGesture = 'freeze';
+            return;
+        }
+
+        currentGesture = 'addshape';
+        setCommandStatus(`Size: ${addShapeScale.toFixed(2)} — open hand = bigger, close = smaller, pinch = place`);
+        return; // Consume all gestures in add mode
     }
-})();
+
+    // === TWO-HAND GESTURES (priority) ===
+    if (hands.length >= 2) {
+        const g1 = gestures[0], g2 = gestures[1];
+
+        // Two palms → Scale (apart/together)
+        if (g1 === 'palm' && g2 === 'palm') {
+            const wrist0 = hands[0][0], wrist1 = hands[1][0];
+            const dist = dist3D(wrist0, wrist1);
+
+            // Scale (hands apart/together)
+            if (gestureState.twoHandDist !== null) {
+                const delta = dist - gestureState.twoHandDist;
+                if (Math.abs(delta) > DEAD_ZONE) {
+                    if (!gestureState.scaleUndoArmed) { saveUndo(); gestureState.scaleUndoArmed = true; }
+                    mesh.scale.multiplyScalar(1 + delta * 2);
+                    setCommandStatus('Scaling...');
+                }
+            }
+            gestureState.twoHandDist = dist;
+            currentGesture = 'scale';
+            gestureLockedUntil = now + MODE_LOCK_MS;
+            return;
+        }
+        gestureState.twoHandDist = null;
+        gestureState.scaleUndoArmed = false;
+
+        // Two pinches apart → Split
+        if (g1 === 'pinch' && g2 === 'pinch') {
+            const p1 = { x: (hands[0][4].x + hands[0][8].x) / 2, y: (hands[0][4].y + hands[0][8].y) / 2 };
+            const p2 = { x: (hands[1][4].x + hands[1][8].x) / 2, y: (hands[1][4].y + hands[1][8].y) / 2 };
+            const pDist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+
+            if (pDist > 0.3) {
+                const hdx = Math.abs(p1.x - p2.x);
+                const hdy = Math.abs(p1.y - p2.y);
+                const splitAxis = hdx > hdy ? 'x' : 'y';
+                splitMesh(0, splitAxis);
+                setCommandStatus(`Split along ${splitAxis.toUpperCase()}`);
+                currentGesture = 'split';
+                gestureLockedUntil = now + 1000;
+            }
+            return;
+        }
+
+        // Palm + spinning index → Revolve (placeholder)
+        if ((g1 === 'palm' && g2 === 'point') || (g1 === 'point' && g2 === 'palm')) {
+            setCommandStatus('Revolve mode — draw profile first');
+            currentGesture = 'revolve';
+            return;
+        }
+    }
+
+    // === SINGLE-HAND GESTURES ===
+    const hand = hands[0];
+    const g = gestures[0];
+
+    // Peace sign (✌️) → Mirror at highlighted area
+    // If faces were highlighted with point gesture, mirror happens at that spot
+    {
+        const palm = hand[0];
+        const indexExt = dist3D(hand[8], palm) > 0.14;
+        const middleExt = dist3D(hand[12], palm) > 0.14;
+        const ringCurled = dist3D(hand[16], palm) < 0.11;
+        const pinkyCurled = dist3D(hand[20], palm) < 0.11;
+        const thumbCurled = dist3D(hand[4], palm) < 0.11;
+        if (indexExt && middleExt && ringCurled && pinkyCurled && thumbCurled) {
+            if (!gestureState._peaceHoldStart) {
+                gestureState._peaceHoldStart = now;
+            } else if (now - gestureState._peaceHoldStart > 500) {
+                if (lastHighlightPoint && lastHighlightNormal) {
+                    // Mirror at the highlighted spot — use the highlight normal to determine axis
+                    const invMatrix = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+                    const localNorm = lastHighlightNormal.clone().transformDirection(invMatrix).normalize();
+                    // Pick the axis most aligned with the highlight normal
+                    const ax = Math.abs(localNorm.x), ay = Math.abs(localNorm.y), az = Math.abs(localNorm.z);
+                    const axis = ax > ay && ax > az ? 'x' : ay > az ? 'y' : 'z';
+                    // Mirror at the highlight point on that axis
+                    const localPt = lastHighlightPoint.clone().applyMatrix4(invMatrix);
+                    const splitPos = axis === 'x' ? localPt.x : axis === 'y' ? localPt.y : localPt.z;
+                    saveUndo();
+                    // Local mirror: duplicate verts mirrored across the split plane at the highlight point
+                    const p = mesh.geometry.attributes.position;
+                    const count = p.count;
+                    const newPos = new Float32Array(count * 6);
+                    newPos.set(p.array, 0);
+                    for (let i = 0; i < count; i++) {
+                        const idx = i * 3;
+                        const ai = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+                        newPos[count * 3 + idx] = ai === 0 ? 2 * splitPos - p.array[idx] : p.array[idx];
+                        newPos[count * 3 + idx + 1] = ai === 1 ? 2 * splitPos - p.array[idx + 1] : p.array[idx + 1];
+                        newPos[count * 3 + idx + 2] = ai === 2 ? 2 * splitPos - p.array[idx + 2] : p.array[idx + 2];
+                    }
+                    const mg = new THREE.BufferGeometry();
+                    mg.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+                    mesh.geometry.dispose();
+                    mesh.geometry = mg;
+                    safeComputeNormals();
+                    refreshWireframe();
+                    setCommandStatus(`Mirrored at highlighted spot (${axis.toUpperCase()}) ✌️`);
+                } else {
+                    // No highlight — mirror whole mesh at center
+                    const wx = hand[0].x;
+                    const axis = wx < 0.4 ? 'x' : wx > 0.6 ? 'z' : 'y';
+                    mirrorMesh(axis);
+                    setCommandStatus(`Mirrored (${axis.toUpperCase()}) ✌️`);
+                }
+                hideHighlight();
+                gestureLockedUntil = now + 1500;
+                gestureState._peaceHoldStart = null;
+                currentGesture = 'mirror';
+                return;
+            }
+            setCommandStatus(lastHighlightPoint ? 'Hold ✌️ to mirror at highlighted area...' : 'Hold ✌️ to mirror...');
+            currentGesture = 'peace';
+            return;
+        } else {
+            gestureState._peaceHoldStart = null;
+        }
+    }
+
+    // 3 fingers up (index + middle + ring) + push down → Array
+    {
+        const palm = hand[0];
+        const indexExt = dist3D(hand[8], palm) > 0.13;
+        const middleExt = dist3D(hand[12], palm) > 0.13;
+        const ringExt = dist3D(hand[16], palm) > 0.13;
+        const pinkyCurled = dist3D(hand[20], palm) < 0.11;
+        const thumbCurled = dist3D(hand[4], palm) < 0.11;
+        if (indexExt && middleExt && ringExt && pinkyCurled && thumbCurled) {
+            // Track vertical motion
+            if (gestureState._threeFingerLastY == null) {
+                gestureState._threeFingerLastY = palm.y;
+            }
+            const dy = palm.y - gestureState._threeFingerLastY;
+            gestureState._threeFingerLastY = palm.y;
+
+            // Pushing down (wrist moving down in frame = y increasing)
+            if (dy > 0.008) {
+                if (!gestureState._threeFingerPushStart) {
+                    gestureState._threeFingerPushStart = now;
+                } else if (now - gestureState._threeFingerPushStart > 250) {
+                    const dir = new THREE.Vector3(1, 0, 0);
+                    arrayMesh(2, dir);
+                    gestureLockedUntil = now + 2000;
+                    gestureState._threeFingerPushStart = null;
+                    gestureState._threeFingerLastY = null;
+                    currentGesture = 'array';
+                    return;
+                }
+                setCommandStatus('3 fingers push down → array...');
+                currentGesture = 'array';
+                return;
+            } else {
+                gestureState._threeFingerPushStart = null;
+            }
+            setCommandStatus('3 fingers up — push down to array');
+            currentGesture = 'threefingers';
+            return;
+        } else {
+            gestureState._threeFingerLastY = null;
+            gestureState._threeFingerPushStart = null;
+        }
+    }
+
+    if (g === 'fist') {
+        // Freeze — do nothing
+        setCommandStatus('Frozen — fist held');
+        currentGesture = 'freeze';
+        return;
+    }
+
+    if (g === 'palm') {
+        // Rotate — palm swipe directly controls rotation direction
+        // Hand moves right → object rotates right, hand moves down → object tilts forward
+        const palmCenter = hand[9]; // middle finger MCP = stable palm center
+        if (gestureState.lastPalmPos[0]) {
+            const dx = palmCenter.x - gestureState.lastPalmPos[0].x;
+            const dy = palmCenter.y - gestureState.lastPalmPos[0].y;
+            if (Math.abs(dx) > ROT_MIN_DELTA || Math.abs(dy) > ROT_MIN_DELTA) {
+                if (!gestureState.rotateUndoArmed) { saveUndo(); gestureState.rotateUndoArmed = true; }
+                // Globe model: hand touching front surface pushes it in that direction
+                // MediaPipe mirrors X (hand moves right → x decreases), so negate
+                // Hand right → surface moves right → rotate Y positive
+                // Hand down  → surface moves down  → rotate X positive (top tilts toward you)
+                const targetVelY = -dx * ROT_SENSITIVITY;
+                const targetVelX = dy * ROT_SENSITIVITY;
+                // Blend toward target velocity — responsive but not jerky
+                smoothRotVelY = smoothRotVelY * (1 - ROT_SMOOTHING) + targetVelY * ROT_SMOOTHING;
+                smoothRotVelX = smoothRotVelX * (1 - ROT_SMOOTHING) + targetVelX * ROT_SMOOTHING;
+                setCommandStatus('Rotating...');
+            }
+        }
+        gestureState.lastPalmPos[0] = { x: palmCenter.x, y: palmCenter.y };
+        gestureState.lastGestures[0] = 'palm';
+        currentGesture = 'rotate';
+        return;
+    } else {
+        // When palm released, reset tracking but keep momentum
+        gestureState.lastPalmPos[0] = null;
+        gestureState.rotateUndoArmed = false;
+    }
+
+    if (g === 'pinch') {
+        const px = (hand[4].x + hand[8].x) / 2;
+        const py = (hand[4].y + hand[8].y) / 2;
+
+        // Hand scale = wrist-to-middle-MCP distance in screen space.
+        // Moves toward camera → hand bigger → scale up. Pull away → smaller → scale down.
+        // Far more reliable than MediaPipe Z values.
+        const handScale = Math.hypot(hand[9].x - hand[0].x, hand[9].y - hand[0].y);
+
+        // First frame — record baseline, no action
+        if (gestureState.lastGestures[0] !== 'pinch') {
+            gestureState.lastPinchPos[0] = { x: px, y: py };
+            gestureState.lastHandScale = handScale;
+            gestureState.startHandScale = handScale;  // baseline for total extrude
+            gestureState.lastGestures[0] = 'pinch';
+            gestureState.extrudeUndoArmed = false;
+            gestureState.extrudeRestPositions = null;  // snapshot of geometry before extrude
+            gestureState.translateUndoArmed = false;
+            smoothTransVelX = 0;
+            smoothTransVelY = 0;
+            smoothExtrudeVel = 0;
+            currentGesture = 'pinch';
+            touchPointMat.color.setHex(0xffdd57);     // yellow = pinch idle
+            touchPointRingMat.color.setHex(0xffdd57);
+            return;
+        }
+
+        // Show touch point at pinch position
+        const screenX = (1 - px) * innerWidth;  // mirror for camera
+        const screenY = py * innerHeight;
+        showTouchPoint(screenX, screenY);
+
+        if (gestureState.lastPinchPos[0] && gestureState.lastHandScale !== undefined) {
+            const dx = px - gestureState.lastPinchPos[0].x;
+            const dy = py - gestureState.lastPinchPos[0].y;
+            const scaleDelta = handScale - gestureState.lastHandScale;
+
+            // --- TRANSLATE: lateral pinch movement moves the object ---
+            const lateralMag = Math.abs(dx) + Math.abs(dy);
+            if (lateralMag > 0.002) {
+                if (!gestureState.translateUndoArmed) {
+                    saveUndo();
+                    gestureState.translateUndoArmed = true;
+                }
+                const moveX = -dx * TRANSLATE_SENSITIVITY;
+                const moveY = dy * TRANSLATE_SENSITIVITY;
+                smoothTransVelX = smoothTransVelX * (1 - PINCH_SMOOTHING) + moveX * PINCH_SMOOTHING;
+                smoothTransVelY = smoothTransVelY * (1 - PINCH_SMOOTHING) + moveY * PINCH_SMOOTHING;
+                mesh.position.x += smoothTransVelX;
+                mesh.position.y -= smoothTransVelY;
+                currentGesture = 'translate';
+                setCommandStatus('Translating...');
+                touchPointMat.color.setHex(0x57ddff);     // blue = translate
+                touchPointRingMat.color.setHex(0x57ddff);
+            }
+
+            // --- EXTRUDE: total hand scale change since pinch started ---
+            // Tracks total distance your hand moved toward/away from camera.
+            // Applies as absolute stretch from original geometry, so the extrusion
+            // length follows your hand and stays when you stop.
+            const totalScaleChange = handScale - gestureState.startHandScale;
+
+            if (Math.abs(totalScaleChange) > 0.003) {
+                // Snapshot original geometry on first extrude frame
+                if (!gestureState.extrudeUndoArmed) {
+                    saveUndo();
+                    gestureState.extrudeUndoArmed = true;
+                    gestureState.extrudeRestPositions = new Float32Array(mesh.geometry.attributes.position.array);
+                }
+
+                if (gestureState.extrudeRestPositions) {
+                    // Smooth the target stretch amount
+                    const targetStretch = totalScaleChange * EXTRUDE_SENSITIVITY * 18;
+                    smoothExtrudeVel = smoothExtrudeVel * 0.6 + targetStretch * 0.4;
+
+                    // Get camera forward in mesh local space
+                    const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                    const invRot = mesh.quaternion.clone().invert();
+                    const localAxis = camForward.applyQuaternion(invRot).normalize();
+
+                    // Apply absolute stretch from rest positions
+                    const p = mesh.geometry.attributes.position;
+                    const rest = gestureState.extrudeRestPositions;
+                    for (let i = 0; i < p.count; i++) {
+                        const rx = rest[i * 3], ry = rest[i * 3 + 1], rz = rest[i * 3 + 2];
+                        const dot = rx * localAxis.x + ry * localAxis.y + rz * localAxis.z;
+                        const stretch = dot * smoothExtrudeVel;
+                        p.setXYZ(i,
+                            rx + localAxis.x * stretch,
+                            ry + localAxis.y * stretch,
+                            rz + localAxis.z * stretch
+                        );
+                    }
+                    p.needsUpdate = true;
+                    safeComputeNormals();
+                    currentGesture = 'extrude';
+                    setCommandStatus(`Extruding: ${Math.abs(smoothExtrudeVel).toFixed(2)} (${totalScaleChange > 0 ? 'pulling out' : 'pushing in'})`);
+                    touchPointMat.color.setHex(0xff6b6b);     // red = extrude
+                    touchPointRingMat.color.setHex(0xff6b6b);
+                }
+            }
+        }
+        gestureState.lastPinchPos[0] = { x: px, y: py };
+        gestureState.lastHandScale = handScale;
+        gestureState.lastGestures[0] = 'pinch';
+        return;
+    } else {
+        // Reset all pinch state on release — extrusion stays where it is
+        gestureState.lastPinchPos[0] = null;
+        gestureState.lastHandScale = undefined;
+        gestureState.startHandScale = undefined;
+        gestureState.extrudeUndoArmed = false;
+        gestureState.extrudeRestPositions = null;
+        gestureState.translateUndoArmed = false;
+        hideTouchPoint();
+        if (gestureState.lastGestures[0] === 'pinch') gestureState.lastGestures[0] = null;
+    }
+
+    if (g === 'cupped') {
+        // Extrude at highlighted face region
+        const wrist = hand[0], mid = hand[9];
+        const cx = (wrist.x + mid.x) / 2;
+        const cy = (wrist.y + mid.y) / 2;
+        const ndc = new THREE.Vector2(-((cx * 2) - 1), -((cy * 2) - 1));
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObject(mesh);
+        if (hits.length) {
+            if (!gestureState.moldUndoArmed) { saveUndo(); gestureState.moldUndoArmed = true; }
+            // Pause abstract animation during sculpting
+            if (currentAppMode === 'abstract') abstractAnimating = false;
+            const hitNorm = getHitNormal(hits[0]).clone().transformDirection(mesh.matrixWorld).normalize();
+            const motion = getMotionVector(0);
+            const strength = -motion.y * 3.0;
+            extrudeAt(hits[0].point, hitNorm, strength * 0.01);
+            highlightFacesAt(hits[0].point, hitNorm);
+            // Update abstract rest positions and reapply colors
+            if (currentAppMode === 'abstract' && abstractRestPositions) {
+                abstractRestPositions = new Float32Array(mesh.geometry.attributes.position.array);
+                applyBlobGradient();
+            }
+            setCommandStatus('Extruding — cupped hand');
+        }
+        currentGesture = 'extrude';
+        return;
+    } else {
+        gestureState.moldUndoArmed = false;
+        // Resume abstract animation when cupped ends
+        if (currentAppMode === 'abstract' && !abstractAnimating) abstractAnimating = true;
+    }
+
+    if (g === 'point') {
+        if (currentAppMode === 'sketch') {
+            const tip = hand[8];
+            const x = (1 - tip.x) * innerWidth;
+            const y = tip.y * innerHeight;
+            if (!isSketchDrawing) { isSketchDrawing = true; lastSketchPt = null; }
+            sketchStroke(x, y);
+            currentGesture = 'sketch';
+        } else {
+            // Highlight faces under fingertip
+            const tip = hand[8];
+            const screenX = (1 - tip.x) * innerWidth;
+            const screenY = tip.y * innerHeight;
+            const ndc = new THREE.Vector2(
+                (screenX / innerWidth) * 2 - 1,
+                -(screenY / innerHeight) * 2 + 1
+            );
+            raycaster.setFromCamera(ndc, camera);
+            const hits = raycaster.intersectObject(mesh);
+            if (hits.length) {
+                const hitNorm = hits[0].face?.normal
+                    ? hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize()
+                    : new THREE.Vector3(0, 0, 1);
+                highlightFacesAt(hits[0].point, hitNorm);
+                setCommandStatus('Pointing at face — pinch to extrude, cupped to sculpt');
+            } else {
+                hideHighlight();
+            }
+            currentGesture = 'select';
+        }
+        return;
+    } else {
+        if (isSketchDrawing) { isSketchDrawing = false; lastSketchPt = null; }
+        if (g !== 'cupped' && g !== 'pinch') hideHighlight();
+    }
+
+    if (g === 'lshape') {
+        // Scale preview for add shape
+        const thumbTip = hand[4], indexTip = hand[8];
+        const spread = dist3D(thumbTip, indexTip);
+        gestureState.addShapeScale = Math.max(0.1, Math.min(2.0, spread * 10));
+        setCommandStatus(`Scale preview: ${gestureState.addShapeScale.toFixed(2)}`);
+        currentGesture = 'scalepreview';
+        return;
+    }
+
+    // Palm eraser in sketch mode
+    if (currentAppMode === 'sketch' && g === 'palm') {
+        const wrist = hand[0];
+        const cx = (1 - wrist.x) * innerWidth;
+        const cy = wrist.y * innerHeight;
+        if (sketchCtx) {
+            sketchCtx.save();
+            sketchCtx.globalCompositeOperation = 'destination-out';
+            sketchCtx.beginPath();
+            sketchCtx.arc(cx, cy, 50, 0, Math.PI * 2);
+            sketchCtx.fill();
+            sketchCtx.restore();
+        }
+        currentGesture = 'erase';
+        return;
+    }
+
+    currentGesture = null;
+}
+
+// ============================================================
+// 10. MEDIAPIPE HAND TRACKING SETUP
+// ============================================================
+let cameraStream = null;
+let lastDetectTime = 0;
+const DETECT_INTERVAL_MS = 33; // ~30fps for hand detection
+
+async function startCamera() {
+    const video = document.getElementById('webcam');
+    const status = document.getElementById('camera-status');
+    if (cameraStream) return true; // already running
+    try {
+        if (status) { status.style.display = 'block'; status.textContent = '📷 Starting camera...'; }
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+        video.srcObject = stream;
+        cameraStream = stream;
+        await video.play();
+        video.classList.add('active');
+        if (status) { status.textContent = '📷 Camera active'; setTimeout(() => { status.style.display = 'none'; }, 2000); }
+        return true;
+    } catch (e) {
+        console.error('Camera failed:', e);
+        if (status) { status.style.display = 'block'; status.textContent = '❌ Camera unavailable: ' + (e.message || e.name); }
+        return false;
+    }
+}
+
+function stopCamera() {
+    const video = document.getElementById('webcam');
+    const status = document.getElementById('camera-status');
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+    }
+    if (video) { video.srcObject = null; video.classList.remove('active'); }
+    if (status) status.style.display = 'none';
+}
+
+async function initHandTracking() {
+    try {
+        const cameraOk = await startCamera();
+        if (!cameraOk) {
+            setCommandStatus('Camera unavailable — hand tracking needs a webcam');
+            return;
+        }
+
+        setCommandStatus('Loading hand tracking model...');
+        const vision = await FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
+        );
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                delegate: 'GPU',
+            },
+            runningMode: 'VIDEO',
+            numHands: 2,
+            minHandDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.5,
+        });
+
+        handTrackingActive = true;
+        setCommandStatus('✋ Hand tracking active — gestures ready!');
+    } catch (e) {
+        console.error('Hand tracking init failed:', e);
+        setCommandStatus('Hand tracking failed: ' + (e.message || 'unknown error'));
+    }
+}
+
+function detectHands() {
+    if (!handTrackingActive || !handLandmarker) return;
+    const now = performance.now();
+    if (now - lastDetectTime < DETECT_INTERVAL_MS) return;
+    lastDetectTime = now;
+    const video = document.getElementById('webcam');
+    if (video.readyState < 2) return;
+    const result = handLandmarker.detectForVideo(video, performance.now());
+
+    if (result.landmarks && result.landmarks.length > 0) {
+        const smoothed = processLandmarks(result.landmarks);
+        const handedness = result.handedness || [];
+
+        // Separate left and right hands
+        // Determine left/right hand by wrist x-position instead of MediaPipe labels
+        // In camera image coords (0=left, 1=right), mirrored:
+        //   User's LEFT hand → right side of image → higher x
+        //   User's RIGHT hand → left side of image → lower x
+        let leftHand = null, rightHand = null;
+        if (smoothed.length === 2) {
+            const wristX0 = smoothed[0][0].x; // wrist landmark
+            const wristX1 = smoothed[1][0].x;
+            // Higher x = user's left hand (mirrored camera)
+            if (wristX0 > wristX1) {
+                leftHand = smoothed[0];
+                rightHand = smoothed[1];
+            } else {
+                leftHand = smoothed[1];
+                rightHand = smoothed[0];
+            }
+        } else if (smoothed.length === 1) {
+            // Single hand: use x position relative to center
+            const wristX = smoothed[0][0].x;
+            if (wristX > 0.5) {
+                leftHand = smoothed[0]; // right side of image = user's left
+            } else {
+                rightHand = smoothed[0]; // left side of image = user's right
+            }
+        }
+
+        // Process gesture modes (wrapped in try-catch so debug always draws)
+        try {
+            processGestureModes(leftHand, rightHand);
+        } catch (e) {
+            console.error('Gesture error:', e);
+            setCommandStatus('Gesture error: ' + e.message);
+        }
+
+        if (isDebug) drawDebugHands(result.landmarks, handedness);
+    } else {
+        currentGesture = null;
+        landmarkInited = [false, false];
+        hideGesturePointer();
+        if (isDebug) clearDebugCanvas();
+    }
+}
+
+// ============================================================
+// GESTURE MODE SYSTEM — Left hand fingers = mouse state, Right hand = cursor
+// ============================================================
+const GM_CIRCUMFERENCE = 2 * Math.PI * 16; // matches SVG circle r=16
+const DEFAULT_MODES = ['leftclick', 'rightclick', 'zoom', 'free'];
+let gmSlots = [...DEFAULT_MODES];
+let gmActiveSlot = 0; // currently active slot index (for mouse-clickable bar)
+let gmRightLastX = 0, gmRightLastY = 0;
+let gmRightSmX = 0, gmRightSmY = 0;
+let gmMouseDown = false; // is a simulated mouse button currently held
+let gmMouseButton = -1;  // which button is held (0=left, 2=right)
+let gmFreezeCursor = false; // free move mode: cursor stays still, toggled on/off
+let gmUndoSaved = false; // track if undo was saved for current gesture drag
+let gmKeyboardMode = -1; // -1 = off, 0-4 = keyboard-activated mode (bypasses left hand)
+let gmFreeToggleCooldown = 0; // timestamp until free move toggle is blocked (hand only)
+const GM_FREE_COOLDOWN_MS = 5000; // 5 second cooldown after hand toggle
+
+// Dwell-to-select in free move mode
+let gmDwellTarget = null;  // scene object entry being hovered
+let gmDwellStart = 0;      // timestamp when dwell started
+const GM_DWELL_MS = 1500;  // 1.5 seconds to select
+
+// Gesture state machine
+let gmState = 'idle';
+let gmPrevState = 'idle';
+let gmFistFrames = 0;
+const GM_FIST_FRAMES = 3;
+let gmWasFist = false;
+let gmGestureActive = 'none';
+let gmTwoPalmLastDist = 0;
+let gmPrePinchPointerX = 0; // pointer position captured before pinch shifted it
+let gmPrePinchPointerY = 0;
+let gmPinchStartX = 0;
+let gmPinchStartY = 0;
+let gmPinchStartHandScale = 0; // hand size at pinch start for depth-based scaling
+let gmPinchUndoSaved = false;
+let gmLeftSmX = 0, gmLeftSmY = 0;
+let gmLeftPrevX = 0, gmLeftPrevY = 0;
+let gmTwoPinchLastDist = 0;
+let gmTwoPinchLastX = 0;
+let gmTwoPinchLastY = 0;
+let gmTwoPinchUndoSaved = false;
+
+// Rotation momentum (spin)
+let gmSpinVelX = 0, gmSpinVelY = 0;
+const GM_SPIN_DAMPING = 0.92;
+const GM_SPIN_MIN = 0.0001;
+
+// Stub functions for removed gesture mode bar system
+function gmReleaseMouseIfHeld() { gmMouseDown = false; gmMouseButton = -1; }
+function updateGMSlotUI() {}
+function showGestureModeBar() {}
+function hideGestureModeBar() {}
+function highlightGMSlot() {}
+function resetGMSlots() {}
+
+// ============================================================
+// FREEFORM MODE — Natural hand gesture engine
+// ============================================================
+
+// Freeform state (isolated from model mode)
+let ffGrabbed = false;       // currently holding an object via pinch
+let ffPinchFrames = 0;       // frames since pinch detected
+let ffPinchActive = false;   // pinch was confirmed
+let ffUndoSaved = false;
+let ffPinchStartHandScale = 0;
+let ffSmX = 0, ffSmY = 0;           // smoothed right palm screen coords
+let ffPrevX = 0, ffPrevY = 0;       // previous frame smoothed coords
+let ffLeftSmX = 0, ffLeftSmY = 0;   // smoothed left palm screen coords
+let ffLeftPrevX = 0, ffLeftPrevY = 0;
+let ffTwoPalmDist = 0;
+let ffTwoPinchDist = 0;
+let ffTwoFistDist = 0;
+let ffThreeFingerLastY = [0, 0]; // per-hand Y tracking for 3-finger push
+let ffThreeFingerUndoSaved = false;
+let ffPrePinchX = 0, ffPrePinchY = 0; // pointer position before pinch shifted it
+let ffDraggingAnchor = null; // anchor handle being dragged via pinch
+let ffAnchorDragAxis = null;
+let ffAnchorDragSign = 0;
+let ffGestureActive = 'none';
+
+// Find nearest anchor handle to screen position (proximity, not raycast)
+function findNearestAnchor(screenX, screenY, tolerancePx) {
+    tolerancePx = tolerancePx || 50;
+    if (!selectedAnchors.length) return null;
+    let bestAnchor = null;
+    let bestDist = tolerancePx;
+    for (const anchor of selectedAnchors) {
+        const worldPos = new THREE.Vector3();
+        anchor.getWorldPosition(worldPos);
+        worldPos.project(camera);
+        const sx = (worldPos.x * 0.5 + 0.5) * innerWidth;
+        const sy = (-worldPos.y * 0.5 + 0.5) * innerHeight;
+        const dist = Math.hypot(sx - screenX, sy - screenY);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestAnchor = anchor;
+        }
+    }
+    return bestAnchor;
+}
+
+// Wider hit detection: raycast first, then bounding-sphere proximity fallback
+function findNearestObject(screenX, screenY, tolerancePx) {
+    tolerancePx = tolerancePx || 60;
+    const ndc = new THREE.Vector2(
+        (screenX / innerWidth) * 2 - 1,
+        -(screenY / innerHeight) * 2 + 1
+    );
+    raycaster.setFromCamera(ndc, camera);
+
+    // 1) Normal raycast
+    const allMeshes = [];
+    for (const entry of sceneObjects) {
+        allMeshes.push(entry.mesh);
+        entry.mesh.traverse(child => { if (child.isMesh) allMeshes.push(child); });
+    }
+    const hits = raycaster.intersectObjects(allMeshes, false);
+    if (hits.length > 0) {
+        let hitObj = hits[0].object;
+        while (hitObj) {
+            const entry = sceneObjects.find(o => o.mesh === hitObj);
+            if (entry) return entry;
+            hitObj = hitObj.parent;
+        }
+    }
+
+    // 2) Bounding-sphere proximity fallback
+    let bestEntry = null;
+    let bestDist = tolerancePx;
+    for (const entry of sceneObjects) {
+        const pos = entry.mesh.position.clone();
+        pos.project(camera);
+        const sx = (pos.x * 0.5 + 0.5) * innerWidth;
+        const sy = (-pos.y * 0.5 + 0.5) * innerHeight;
+        const dist = Math.hypot(sx - screenX, sy - screenY);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestEntry = entry;
+        }
+    }
+    return bestEntry;
+}
+
+function processFreeformGestures(leftHand, rightHand) {
+    if (!rightHand) {
+        hideGesturePointer();
+        ffPinchFrames = 0;
+        ffPinchActive = false;
+        ffGrabbed = false;
+        ffGestureActive = 'none';
+        return;
+    }
+
+    // --- Helpers (reuse from model mode pattern) ---
+    function countExt(hand) {
+        if (!hand) return 0;
+        let n = 0;
+        if (hand[8].y < hand[6].y) n++;
+        if (hand[12].y < hand[10].y) n++;
+        if (hand[16].y < hand[14].y) n++;
+        if (hand[20].y < hand[18].y) n++;
+        const thumbDist = Math.hypot(hand[4].x - hand[17].x, hand[4].y - hand[17].y);
+        if (thumbDist > 0.1) n++;
+        return n;
+    }
+    function isOpenPalmFF(hand) { return hand && countExt(hand) >= 5; }
+    function isFistFF(hand) { return hand && countExt(hand) <= 1; }
+    function isCuppedFF(hand) {
+        if (!hand) return false;
+        const palm = hand[0];
+        let curled = 0;
+        for (const idx of [8, 12, 16, 20]) {
+            const mcp = hand[idx - 3];
+            const tip = hand[idx];
+            if (Math.hypot(tip.x - palm.x, tip.y - palm.y) < Math.hypot(mcp.x - palm.x, mcp.y - palm.y)) curled++;
+        }
+        return curled >= 3 && !isPinch(hand) && !isFistFF(hand);
+    }
+    function isPointingFF(hand) {
+        if (!hand) return false;
+        const palm = hand[0];
+        const indexExt = Math.hypot(hand[8].x - palm.x, hand[8].y - palm.y) > 0.14;
+        const middleCurled = Math.hypot(hand[12].x - palm.x, hand[12].y - palm.y) < 0.12;
+        const ringCurled = Math.hypot(hand[16].x - palm.x, hand[16].y - palm.y) < 0.12;
+        return indexExt && middleCurled && ringCurled && !isPinch(hand);
+    }
+
+    // --- Update pointer & smoothed positions ---
+    updateGesturePointer(rightHand);
+
+    const rPalm = rightHand[9];
+    const rScreenX = (1 - rPalm.x) * innerWidth;
+    const rScreenY = rPalm.y * innerHeight;
+    ffPrevX = ffSmX;
+    ffPrevY = ffSmY;
+    ffSmX = ffSmX * 0.35 + rScreenX * 0.65;
+    ffSmY = ffSmY * 0.35 + rScreenY * 0.65;
+
+    if (leftHand) {
+        const lPalm = leftHand[9];
+        const lsx = (1 - lPalm.x) * innerWidth;
+        const lsy = lPalm.y * innerHeight;
+        ffLeftPrevX = ffLeftSmX;
+        ffLeftPrevY = ffLeftSmY;
+        ffLeftSmX = ffLeftSmX * 0.35 + lsx * 0.65;
+        ffLeftSmY = ffLeftSmY * 0.35 + lsy * 0.65;
+    }
+
+    // --- Classify gestures ---
+    const rightPinch = isPinch(rightHand);
+    const rightOpen = isOpenPalmFF(rightHand);
+    const rightFist = isFistFF(rightHand);
+    const rightCupped = isCuppedFF(rightHand);
+    const rightPointing = isPointingFF(rightHand);
+    const leftOpen = leftHand ? isOpenPalmFF(leftHand) : false;
+    const leftPinch = leftHand ? isPinch(leftHand) : false;
+    const leftFist = leftHand ? isFistFF(leftHand) : false;
+
+    // 3-finger detector: index + middle + ring extended, pinky + thumb curled
+    function isThreeFingers(hand) {
+        if (!hand) return false;
+        const palm = hand[0];
+        const indexExt = Math.hypot(hand[8].x - palm.x, hand[8].y - palm.y) > 0.12;
+        const middleExt = Math.hypot(hand[12].x - palm.x, hand[12].y - palm.y) > 0.12;
+        const ringExt = Math.hypot(hand[16].x - palm.x, hand[16].y - palm.y) > 0.12;
+        const pinkyCurled = Math.hypot(hand[20].x - palm.x, hand[20].y - palm.y) < 0.11;
+        const thumbCurled = Math.hypot(hand[4].x - palm.x, hand[4].y - palm.y) < 0.12;
+        return indexExt && middleExt && ringExt && pinkyCurled && thumbCurled;
+    }
+    const rightThree = isThreeFingers(rightHand);
+    const leftThree = leftHand ? isThreeFingers(leftHand) : false;
+
+    // --- Snapshot pointer before pinch shifts it ---
+    if (!rightPinch) {
+        ffPrePinchX = gpSmoothX;
+        ffPrePinchY = gpSmoothY;
+    }
+
+    // --- HOVER: always raycast for highlight (when not pinching) ---
+    if (!rightPinch && !rightCupped && sceneObjects.length > 0) {
+        const hoverEntry = findNearestObject(gpSmoothX, gpSmoothY, 80);
+        setHoveredObject(hoverEntry);
+    } else if (rightPinch) {
+        clearHoveredObject();
+    }
+
+    // ========================
+    // A. FIST = FREEZE
+    // ========================
+    if (rightFist && !rightPinch) {
+        setCommandStatus('✊ Frozen — fist held');
+        ffGestureActive = 'freeze';
+        return;
+    }
+
+    // ========================
+    // B. TWO OPEN PALMS (no selection) = ZOOM
+    // ========================
+    if (rightOpen && leftOpen && !selectedObject) {
+        const rp = rightHand[9], lp = leftHand[9];
+        const d = Math.hypot(rp.x - lp.x, rp.y - lp.y);
+        if (ffTwoPalmDist > 0) {
+            const delta = d - ffTwoPalmDist;
+            if (Math.abs(delta) > 0.003) {
+                doCameraZoom(-delta * 300);
+            }
+        }
+        ffTwoPalmDist = d;
+        setCommandStatus('🖐🖐 Zoom — spread/close hands');
+        ffGestureActive = 'zoom';
+        return;
+    }
+    ffTwoPalmDist = 0;
+
+    // ========================
+    // C. LEFT OPEN PALM + SELECTED = ROTATE selected object
+    // ========================
+    if (leftOpen && selectedObject && !rightPinch) {
+        const dx = ffLeftSmX - ffLeftPrevX;
+        const dy = ffLeftSmY - ffLeftPrevY;
+        if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
+            if (ffGestureActive !== 'left-rotating') { saveUndo(); }
+            const angleY = dx * 0.005;
+            const angleX = dy * 0.005;
+            const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+            const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+            selectedObject.mesh.quaternion.premultiply(qX.clone().multiply(qY));
+            updateSelectedOutline();
+            setCommandStatus(`🖐 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name} (left hand)`);
+            ffGestureActive = 'left-rotating';
+        }
+    }
+
+    // ========================
+    // D. TWO PINCHES + SELECTED = STRETCH/SCALE with both hands
+    // ========================
+    if (rightPinch && leftPinch && selectedObject) {
+        const rp = { x: (rightHand[4].x + rightHand[8].x) / 2, y: (rightHand[4].y + rightHand[8].y) / 2 };
+        const lp = { x: (leftHand[4].x + leftHand[8].x) / 2, y: (leftHand[4].y + leftHand[8].y) / 2 };
+        const d = Math.hypot(rp.x - lp.x, rp.y - lp.y);
+        if (ffTwoPinchDist > 0) {
+            const delta = d - ffTwoPinchDist;
+            if (Math.abs(delta) > 0.003) {
+                if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
+                const factor = 1 + delta * 3;
+                selectedObject.mesh.scale.multiplyScalar(Math.max(0.1, Math.min(5.0, factor)));
+                updateSelectedOutline();
+                setCommandStatus(`👌👌 Scaling ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            }
+        }
+        ffTwoPinchDist = d;
+        ffGestureActive = 'two-pinch-scale';
+        return;
+    }
+    ffTwoPinchDist = 0;
+
+    // ========================
+    // E. PINCH = GRAB, MOVE, SCALE (depth), or EXTRUDE (anchor drag)
+    // ========================
+    if (rightPinch) {
+        if (!ffPinchActive) {
+            ffPinchFrames++;
+            if (ffPinchFrames >= 1) {
+                ffPinchActive = true;
+                ffUndoSaved = false;
+                ffDraggingAnchor = null;
+                ffPinchStartHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+
+                // Check if pinching near an anchor handle first (extrude mode)
+                if (selectedObject && selectedAnchors.length > 0) {
+                    const nearAnchor = findNearestAnchor(ffPrePinchX, ffPrePinchY, 60);
+                    if (nearAnchor) {
+                        ffDraggingAnchor = nearAnchor;
+                        ffAnchorDragAxis = nearAnchor.userData.axis;
+                        ffAnchorDragSign = nearAnchor.userData.sign;
+                        ffGrabbed = false;
+                        saveUndo();
+                        ffUndoSaved = true;
+                        setCommandStatus(`👌 Grabbed ${ffAnchorDragAxis.toUpperCase()} handle — drag to extrude`);
+                        return;
+                    }
+                }
+
+                // Select object under pre-pinch pointer (wider hit detection)
+                const entry = findNearestObject(ffPrePinchX, ffPrePinchY, 80);
+                if (entry) {
+                    clearHoveredObject();
+                    selectObject(entry);
+                    ffGrabbed = true;
+                    setCommandStatus(`👌 Grabbed ${SHAPE_LABELS[entry.name] || entry.name} — drag to move, push/pull to scale`);
+                } else if (hoveredObject) {
+                    const hov = hoveredObject;
+                    clearHoveredObject();
+                    selectObject(hov);
+                    ffGrabbed = true;
+                    setCommandStatus(`👌 Grabbed ${SHAPE_LABELS[hov.name] || hov.name} — drag to move, push/pull to scale`);
+                } else if (selectedObject) {
+                    deselectObject();
+                    ffGrabbed = false;
+                    setCommandStatus('👌 Released — pinch on a shape to grab it');
+                }
+            }
+        } else if (ffDraggingAnchor && selectedObject) {
+            // --- ANCHOR DRAG: extrude/scale along locked axis ---
+            const dx = ffSmX - ffPrevX;
+            const dy = ffSmY - ffPrevY;
+            const scaleSpeed = 0.006;
+            const delta = (Math.abs(dx) > Math.abs(dy) ? dx : -dy) * scaleSpeed * ffAnchorDragSign;
+            if (Math.abs(delta) > 0.0001) {
+                const s = selectedObject.mesh.scale;
+                if (ffAnchorDragAxis === 'x') s.x = Math.max(0.05, s.x + delta);
+                else if (ffAnchorDragAxis === 'y') s.y = Math.max(0.05, s.y + delta);
+                else if (ffAnchorDragAxis === 'z') s.z = Math.max(0.05, s.z + delta);
+                updateSelectedOutline();
+                setCommandStatus(`👌 Extruding ${ffAnchorDragAxis.toUpperCase()}: ${s[ffAnchorDragAxis].toFixed(2)}`);
+            }
+            ffGestureActive = 'anchor-extrude';
+        } else if (ffGrabbed && selectedObject) {
+            // --- PINCH HELD: MOVE (lat drag) + SCALE (depth) ---
+            if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
+
+            // MOVE: lateral drag translates in camera plane
+            const dx = ffSmX - ffPrevX;
+            const dy = ffSmY - ffPrevY;
+            if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
+                const camRightV = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const camUpV = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                const moveSpeed = 0.004 * camera.position.distanceTo(selectedObject.mesh.position);
+                selectedObject.mesh.position.add(camRightV.clone().multiplyScalar(dx * moveSpeed));
+                selectedObject.mesh.position.add(camUpV.clone().multiplyScalar(-dy * moveSpeed));
+                updateSelectedOutline();
+                setCommandStatus(`👌 Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                ffGestureActive = 'moving';
+            }
+
+            // SCALE: hand size change (push/pull = depth)
+            const currentHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+            const scaleDelta = currentHandScale - ffPinchStartHandScale;
+            if (Math.abs(scaleDelta) > 0.006) {
+                const factor = 1 + scaleDelta * 2;
+                selectedObject.mesh.scale.multiplyScalar(Math.max(0.5, Math.min(2.0, factor)));
+                ffPinchStartHandScale = currentHandScale;
+                updateSelectedOutline();
+                if (ffGestureActive !== 'moving') {
+                    setCommandStatus(`👌 Scaling ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                    ffGestureActive = 'scaling';
+                }
+            }
+
+            // LEFT PALM simultaneous rotate while right pinch moves
+            if (leftOpen && selectedObject) {
+                const ldx = ffLeftSmX - ffLeftPrevX;
+                const ldy = ffLeftSmY - ffLeftPrevY;
+                if (Math.abs(ldx) > 0.3 || Math.abs(ldy) > 0.3) {
+                    const angleY = ldx * 0.005;
+                    const angleX = ldy * 0.005;
+                    const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                    const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                    selectedObject.mesh.quaternion.premultiply(qX.clone().multiply(qY));
+                    updateSelectedOutline();
+                }
+            }
+        }
+        ffGestureActive = ffGestureActive || 'grabbing';
+        return;
+    }
+    // Release pinch = drop in place (object stays, remains selected)
+    if (!rightPinch && ffPinchActive) {
+        if (ffDraggingAnchor) {
+            setCommandStatus(`Extruded ${ffAnchorDragAxis.toUpperCase()} — pinch another handle or grab to move`);
+            ffDraggingAnchor = null;
+            ffAnchorDragAxis = null;
+            ffAnchorDragSign = 0;
+        } else if (ffGrabbed && selectedObject) {
+            setCommandStatus(`Placed ${SHAPE_LABELS[selectedObject.name] || selectedObject.name} — palm to rotate, pinch to grab again`);
+        }
+        ffPinchFrames = 0;
+        ffPinchActive = false;
+        ffGrabbed = false;
+        ffUndoSaved = false;
+    }
+
+    // ========================
+    // F. TWO FISTS + SELECTED = EXTRUDE/SCALE (push together = shrink, pull apart = grow)
+    // ========================
+    if (rightFist && leftFist && selectedObject) {
+        const rWrist = rightHand[0], lWrist = leftHand[0];
+        const d = Math.hypot(rWrist.x - lWrist.x, rWrist.y - lWrist.y);
+        if (ffTwoFistDist > 0) {
+            const delta = d - ffTwoFistDist;
+            if (Math.abs(delta) > 0.003) {
+                if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
+                const factor = 1 + delta * 3;
+                selectedObject.mesh.scale.multiplyScalar(Math.max(0.1, Math.min(5.0, factor)));
+                updateSelectedOutline();
+                const action = delta > 0 ? 'Stretching' : 'Squishing';
+                setCommandStatus(`✊✊ ${action} ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            }
+        }
+        ffTwoFistDist = d;
+        ffGestureActive = 'two-fist-scale';
+        return;
+    }
+    ffTwoFistDist = 0;
+    if (!rightFist || !leftFist) { if (ffGestureActive === 'two-fist-scale') ffUndoSaved = false; }
+
+    // ========================
+    // F2. THREE FINGERS EACH HAND + PUSH = SCULPT/SQUISH
+    // Push forward (hands move toward screen / Y increases) = push surface in
+    // Pull back (hands move away / Y decreases) = pull surface out
+    // ========================
+    if (rightThree && leftThree && selectedObject) {
+        // Average palm center of both hands for raycast target
+        const rMid = rightHand[9], lMid = leftHand[9];
+        const cx = ((1 - rMid.x) + (1 - lMid.x)) / 2 * innerWidth;
+        const cy = (rMid.y + lMid.y) / 2 * innerHeight;
+
+        // Track vertical motion (Y in MediaPipe space) for push/pull strength
+        const rWristY = rightHand[0].y;
+        const lWristY = leftHand[0].y;
+
+        if (ffThreeFingerLastY[0] === 0) {
+            ffThreeFingerLastY[0] = rWristY;
+            ffThreeFingerLastY[1] = lWristY;
+        }
+        const dyR = rWristY - ffThreeFingerLastY[0];
+        const dyL = lWristY - ffThreeFingerLastY[1];
+        const avgDy = (dyR + dyL) / 2; // positive = pushing forward, negative = pulling back
+        ffThreeFingerLastY[0] = rWristY;
+        ffThreeFingerLastY[1] = lWristY;
+
+        // Raycast from center of both hands to selected mesh
+        const ndc = new THREE.Vector2(
+            (cx / innerWidth) * 2 - 1,
+            -(cy / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObject(selectedObject.mesh);
+        if (hits.length && Math.abs(avgDy) > 0.002) {
+            if (!ffThreeFingerUndoSaved) { saveUndo(); ffThreeFingerUndoSaved = true; }
+            const hitNorm = getHitNormal(hits[0]).clone().transformDirection(selectedObject.mesh.matrixWorld).normalize();
+            const strength = -avgDy * 4.0; // push in = negative extrude, pull out = positive
+            const prevMesh = mesh;
+            mesh = selectedObject.mesh;
+            extrudeAt(hits[0].point, hitNorm, strength * 0.01);
+            mesh = prevMesh;
+            highlightFacesAt(hits[0].point, hitNorm);
+            const action = avgDy > 0 ? 'Pushing in' : 'Pulling out';
+            setCommandStatus(`🖐🖐 ${action} — sculpting ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+        } else if (!hits.length) {
+            setCommandStatus('🖐🖐 3 fingers — aim at shape surface to sculpt');
+        }
+        ffGestureActive = 'three-finger-sculpt';
+        return;
+    }
+    if (!rightThree || !leftThree) {
+        ffThreeFingerLastY = [0, 0];
+        if (ffGestureActive === 'three-finger-sculpt') {
+            ffThreeFingerUndoSaved = false;
+            hideHighlight();
+        }
+    }
+
+    // ========================
+    // G. POINT = HIGHLIGHT faces
+    // ========================
+    if (rightPointing) {
+        const tip = rightHand[8];
+        const sx = (1 - tip.x) * innerWidth;
+        const sy = tip.y * innerHeight;
+        const ndc = new THREE.Vector2(
+            (sx / innerWidth) * 2 - 1,
+            -(sy / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        if (selectedObject) {
+            const hits = raycaster.intersectObject(selectedObject.mesh);
+            if (hits.length) {
+                const hitNorm = hits[0].face?.normal
+                    ? hits[0].face.normal.clone().transformDirection(selectedObject.mesh.matrixWorld).normalize()
+                    : new THREE.Vector3(0, 0, 1);
+                highlightFacesAt(hits[0].point, hitNorm);
+                setCommandStatus('☝️ Pointing at face — cupped hand to sculpt');
+            } else {
+                hideHighlight();
+            }
+        } else {
+            // Try to find any object under pointer
+            const allMeshes = sceneObjects.map(e => e.mesh);
+            const hits = raycaster.intersectObjects(allMeshes, true);
+            if (hits.length) {
+                const hitNorm = hits[0].face?.normal
+                    ? hits[0].face.normal.clone().transformDirection(hits[0].object.matrixWorld).normalize()
+                    : new THREE.Vector3(0, 0, 1);
+                highlightFacesAt(hits[0].point, hitNorm);
+            } else {
+                hideHighlight();
+            }
+        }
+        ffGestureActive = 'pointing';
+        return;
+    } else {
+        if (ffGestureActive === 'pointing') hideHighlight();
+    }
+
+    // ========================
+    // H. OPEN PALM = ROTATE selected or orbit camera
+    // ========================
+    if (rightOpen && !leftOpen) {
+        const dx = ffSmX - ffPrevX;
+        const dy = ffSmY - ffPrevY;
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            if (selectedObject) {
+                if (ffGestureActive !== 'rotating') { saveUndo(); }
+                const angleY = dx * 0.005;
+                const angleX = dy * 0.005;
+                const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                selectedObject.mesh.quaternion.premultiply(qX.clone().multiply(qY));
+                updateSelectedOutline();
+                setCommandStatus(`🖐 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                showOrbitRef();
+                doCameraOrbit(dx, dy);
+                setCommandStatus('🖐 Orbiting camera — pinch a shape to grab it');
+            }
+        }
+        ffGestureActive = 'rotating';
+        return;
+    }
+
+    // Idle state
+    if (sceneObjects.length > 0 && !selectedObject) {
+        setCommandStatus('Point at a shape, then pinch to grab');
+    } else if (selectedObject) {
+        setCommandStatus(`${SHAPE_LABELS[selectedObject.name] || selectedObject.name} selected — pinch to grab, palm to rotate`);
+    }
+    ffGestureActive = 'idle';
+}
+
+// Wire up freeform shape buttons
+document.querySelectorAll('.ff-shape-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const shape = btn.dataset.ffshape;
+        if (!shape) return;
+        if (currentAppMode !== 'freeform') applyAppMode('freeform');
+        const entry = addSceneObject(shape, new THREE.Vector3(0, 0, 0), 0.5);
+        selectObject(entry);
+        setCommandStatus(`Added ${SHAPE_LABELS[shape] || shape} — grab it with pinch!`);
+    });
+});
+
+// Freeform color wheel
+const ffColorWheel = document.getElementById('ff-color-wheel');
+if (ffColorWheel) {
+    ffColorWheel.addEventListener('input', () => {
+        if (selectedObject && selectedObject.mesh.material) {
+            selectedObject.mesh.material.color.set(ffColorWheel.value);
+        }
+    });
+}
+
+function processGestureModes(leftHand, rightHand) {
+    // --- SKETCH MODE: index finger drawing ---
+    if (currentAppMode === 'sketch' && rightHand) {
+        const indexTip = rightHand[8];
+        const screenX = (1 - indexTip.x) * innerWidth;
+        const screenY = indexTip.y * innerHeight;
+        updateGesturePointer(rightHand);
+        const indexPIP = rightHand[6];
+        const middleTip = rightHand[12];
+        const middlePIP = rightHand[10];
+        const indexExtended = indexTip.y < indexPIP.y;
+        const middleCurled = middleTip.y >= middlePIP.y;
+        if (indexExtended && middleCurled) {
+            if (!isSketchDrawing) { saveSketchUndo(); isSketchDrawing = true; lastSketchPt = null; }
+            sketchStroke(screenX, screenY);
+        } else if (isSketchDrawing) {
+            isSketchDrawing = false; lastSketchPt = null;
+        }
+        return;
+    }
+
+    // --- FREEFORM MODE: dedicated gesture engine ---
+    if (currentAppMode === 'freeform') {
+        processFreeformGestures(leftHand, rightHand);
+        return;
+    }
+
+    if (currentAppMode !== 'model') return;
+
+    // --- Helper: count extended fingers ---
+    function countExt(hand) {
+        if (!hand) return 0;
+        let n = 0;
+        if (hand[8].y < hand[6].y) n++;   // index
+        if (hand[12].y < hand[10].y) n++;  // middle
+        if (hand[16].y < hand[14].y) n++;  // ring
+        if (hand[20].y < hand[18].y) n++;  // pinky
+        const thumbDist = Math.hypot(hand[4].x - hand[17].x, hand[4].y - hand[17].y);
+        if (thumbDist > 0.1) n++; // thumb
+        return n;
+    }
+
+    function isFistGesture(hand) {
+        if (!hand) return false;
+        return countExt(hand) <= 1; // 0 or 1 finger = fist
+    }
+
+    function isOpenPalm(hand) {
+        if (!hand) return false;
+        return countExt(hand) >= 5;
+    }
+
+    if (!rightHand) {
+        hideGesturePointer();
+        hideOrbitRef();
+        gmFistFrames = 0;
+        gmWasFist = false;
+        gmGestureActive = 'none';
+        return;
+    }
+
+    // --- Always update pointer at index fingertip ---
+    const indexTip = rightHand[8];
+    const pointerX = (1 - indexTip.x) * innerWidth;
+    const pointerY = indexTip.y * innerHeight;
+
+    const palm = rightHand[9];
+    const screenX = (1 - palm.x) * innerWidth;
+    const screenY = palm.y * innerHeight;
+    const prevX = gmRightSmX;
+    const prevY = gmRightSmY;
+    // Smoother pointer tracking (0.6 new, 0.4 old for stability)
+    gmRightSmX = gmRightSmX * 0.4 + screenX * 0.6;
+    gmRightSmY = gmRightSmY * 0.4 + screenY * 0.6;
+
+    // Snapshot pointer position before pinch shifts it — used for pinch selection
+    const rightPinchCheck = isPinch(rightHand);
+    if (!rightPinchCheck) {
+        gmPrePinchPointerX = gpSmoothX;
+        gmPrePinchPointerY = gpSmoothY;
+    }
+
+    updateGesturePointer(rightHand);
+
+    // --- Hover highlight: raycast from pointer to show which object would be selected ---
+    if (!rightPinchCheck && sceneObjects.length > 0) {
+        const hoverNdc = new THREE.Vector2(
+            (gpSmoothX / innerWidth) * 2 - 1,
+            -(gpSmoothY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(hoverNdc, camera);
+        const hoverMeshes = [];
+        for (const entry of sceneObjects) {
+            hoverMeshes.push(entry.mesh);
+            entry.mesh.traverse(child => { if (child.isMesh) hoverMeshes.push(child); });
+        }
+        const hoverHits = raycaster.intersectObjects(hoverMeshes, false);
+        if (hoverHits.length > 0) {
+            let hitObj = hoverHits[0].object;
+            let entry = null;
+            while (hitObj) {
+                entry = sceneObjects.find(o => o.mesh === hitObj);
+                if (entry) break;
+                hitObj = hitObj.parent;
+            }
+            setHoveredObject(entry || null);
+        } else {
+            clearHoveredObject();
+        }
+    } else if (rightPinchCheck) {
+        clearHoveredObject();
+    }
+
+    // --- Classify current hand gesture ---
+    const rightExt = countExt(rightHand);
+    const rightFist = isFistGesture(rightHand);
+    const rightOpen = isOpenPalm(rightHand);
+    const rightPinch = isPinch(rightHand);
+    const leftOpen = leftHand ? isOpenPalm(leftHand) : false;
+    const leftPinch = leftHand ? isPinch(leftHand) : false;
+
+    // Debug status when idle
+    const pinchDist2D = Math.hypot(rightHand[4].x - rightHand[8].x, rightHand[4].y - rightHand[8].y);
+    const debugFingers = `${rightExt}f P:${pinchDist2D.toFixed(2)}/${PINCH_THRESHOLD}${rightFist ? ' FIST' : ''}${rightOpen ? ' OPEN' : ''}${rightPinch ? ' 👌PINCH' : ''}`;
+
+    // --- Track left hand smoothed position ---
+    if (leftHand) {
+        const lPalm = leftHand[9];
+        const lScreenX = (1 - lPalm.x) * innerWidth;
+        const lScreenY = lPalm.y * innerHeight;
+        gmLeftPrevX = gmLeftSmX;
+        gmLeftPrevY = gmLeftSmY;
+        gmLeftSmX = gmLeftSmX * 0.4 + lScreenX * 0.6;
+        gmLeftSmY = gmLeftSmY * 0.4 + lScreenY * 0.6;
+    }
+
+    // --- LEFT HAND OPEN PALM + SELECTED OBJECT = ROTATE SELECTED (priority over two-palm zoom) ---
+    if (leftOpen && selectedObject) {
+        const dx = gmLeftSmX - gmLeftPrevX;
+        const dy = gmLeftSmY - gmLeftPrevY;
+        if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
+            if (gmGestureActive !== 'left-rotating') { saveUndo(); }
+            const angleY = dx * 0.005;
+            const angleX = dy * 0.005;
+            const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+            const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+            const combinedQ = qX.clone().multiply(qY);
+            selectedObject.mesh.quaternion.premultiply(combinedQ);
+            updateSelectedOutline();
+            setCommandStatus(`🖐 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name} (left hand)`);
+            gmGestureActive = 'left-rotating';
+        }
+        // If right hand is also pinching, let that continue too (don't return)
+        if (!rightPinch) {
+            gmRightLastX = gmRightSmX;
+            gmRightLastY = gmRightSmY;
+            // Don't return — allow right hand gestures to also apply
+        }
+    }
+
+    // --- TWO OPEN PALMS (no selection) = ZOOM ---
+    if (rightOpen && leftOpen && !selectedObject) {
+        const rPalm = rightHand[9];
+        const lPalm = leftHand[9];
+        const palmDist = Math.hypot(rPalm.x - lPalm.x, rPalm.y - lPalm.y);
+        if (!gmTwoPalmLastDist) {
+            gmTwoPalmLastDist = palmDist;
+        } else {
+            const delta = palmDist - gmTwoPalmLastDist;
+            if (Math.abs(delta) > 0.003) {
+                doCameraZoom(-delta * 300);
+            }
+            gmTwoPalmLastDist = palmDist;
+        }
+        setCommandStatus('Zoom — spread/close hands');
+        gmGestureActive = 'zoom';
+        gmRightLastX = gmRightSmX;
+        gmRightLastY = gmRightSmY;
+        return;
+    }
+    gmTwoPalmLastDist = 0;
+
+    // --- TWO PEACE SIGNS (✌️✌️) = MIRROR ---
+    if (leftHand && rightHand) {
+        function isPeaceSign(hand) {
+            const palm = hand[0];
+            const indexExt = Math.hypot(hand[8].x - palm.x, hand[8].y - palm.y) > 0.12;
+            const middleExt = Math.hypot(hand[12].x - palm.x, hand[12].y - palm.y) > 0.12;
+            const ringCurled = Math.hypot(hand[16].x - palm.x, hand[16].y - palm.y) < 0.13;
+            const pinkyCurled = Math.hypot(hand[20].x - palm.x, hand[20].y - palm.y) < 0.13;
+            // Thumb can be semi-extended during peace sign — don't require it curled
+            return indexExt && middleExt && ringCurled && pinkyCurled;
+        }
+        if (isPeaceSign(rightHand) && isPeaceSign(leftHand)) {
+            if (!gestureState._twoPeaceStart) {
+                gestureState._twoPeaceStart = performance.now();
+            } else if (performance.now() - gestureState._twoPeaceStart > 400) {
+                // Auto-select if nothing selected
+                if (!selectedObject && sceneObjects.length > 0) selectObject(sceneObjects[0]);
+                saveUndo();
+                const wx = rightHand[0].x;
+                const axis = wx < 0.4 ? 'x' : wx > 0.6 ? 'z' : 'y';
+                mirrorMesh(axis);
+                setCommandStatus(`✌️✌️ Mirrored (${axis.toUpperCase()})!`);
+                gestureState._twoPeaceStart = null;
+                gestureLockedUntil = performance.now() + 1500;
+                gmGestureActive = 'mirror';
+                return;
+            }
+            setCommandStatus('✌️✌️ Hold peace signs to mirror...');
+            gmGestureActive = 'mirror';
+            return;
+        } else {
+            gestureState._twoPeaceStart = null;
+        }
+    }
+
+    // --- ROCK N ROLL (🤘) = ARRAY ---
+    {
+        function isRockNRoll(hand) {
+            const palm = hand[0];
+            const indexExt = Math.hypot(hand[8].x - palm.x, hand[8].y - palm.y) > 0.12;
+            const pinkyExt = Math.hypot(hand[20].x - palm.x, hand[20].y - palm.y) > 0.12;
+            const middleCurled = Math.hypot(hand[12].x - palm.x, hand[12].y - palm.y) < 0.13;
+            const ringCurled = Math.hypot(hand[16].x - palm.x, hand[16].y - palm.y) < 0.13;
+            // Thumb can be in any position for rock n roll
+            return indexExt && pinkyExt && middleCurled && ringCurled;
+        }
+        if (isRockNRoll(rightHand)) {
+            if (!gestureState._rockStart) {
+                gestureState._rockStart = performance.now();
+            } else if (performance.now() - gestureState._rockStart > 400) {
+                // Auto-select if nothing selected
+                if (!selectedObject && sceneObjects.length > 0) selectObject(sceneObjects[0]);
+                saveUndo();
+                const dir = new THREE.Vector3(1, 0, 0);
+                arrayMesh(2, dir);
+                setCommandStatus('🤘 Array duplicated!');
+                gestureState._rockStart = null;
+                gestureLockedUntil = performance.now() + 1500;
+                gmGestureActive = 'array';
+                return;
+            }
+            setCommandStatus('🤘 Hold rock n roll to array...');
+            gmGestureActive = 'array';
+            return;
+        } else {
+            gestureState._rockStart = null;
+        }
+    }
+
+    // --- TWO PINCH DRAG = EXTRUDE along dominant axis (priority over single pinch) ---
+    if (rightPinch && leftPinch && selectedObject) {
+        const rp = { x: (rightHand[4].x + rightHand[8].x) / 2, y: (rightHand[4].y + rightHand[8].y) / 2 };
+        const lp = { x: (leftHand[4].x + leftHand[8].x) / 2, y: (leftHand[4].y + leftHand[8].y) / 2 };
+        const distX = Math.abs(rp.x - lp.x);
+        const distY = Math.abs(rp.y - lp.y);
+        const totalDist = Math.hypot(rp.x - lp.x, rp.y - lp.y);
+
+        if (!gmTwoPinchLastDist) {
+            gmTwoPinchLastDist = totalDist;
+            gmTwoPinchLastX = distX;
+            gmTwoPinchLastY = distY;
+        } else {
+            const deltaTotal = totalDist - gmTwoPinchLastDist;
+            const deltaX = distX - gmTwoPinchLastX;
+            const deltaY = distY - gmTwoPinchLastY;
+
+            if (Math.abs(deltaTotal) > 0.003) {
+                if (!gmTwoPinchUndoSaved) { saveUndo(); gmTwoPinchUndoSaved = true; }
+                const s = selectedObject.mesh.scale;
+                const absDx = Math.abs(deltaX);
+                const absDy = Math.abs(deltaY);
+                const scaleAmt = deltaTotal * 3;
+
+                if (absDx > absDy * 1.5) {
+                    s.x = Math.max(0.05, s.x + scaleAmt);
+                    setCommandStatus(`👌👌 Extruding X: ${s.x.toFixed(2)}`);
+                } else if (absDy > absDx * 1.5) {
+                    s.y = Math.max(0.05, s.y + scaleAmt);
+                    setCommandStatus(`👌👌 Extruding Y: ${s.y.toFixed(2)}`);
+                } else {
+                    const factor = 1 + deltaTotal * 3;
+                    s.x *= Math.max(0.5, Math.min(2.0, factor));
+                    s.y *= Math.max(0.5, Math.min(2.0, factor));
+                    s.z *= Math.max(0.5, Math.min(2.0, factor));
+                    setCommandStatus(`👌👌 Scaling all: ${s.x.toFixed(2)}`);
+                }
+                updateSelectedOutline();
+            }
+            gmTwoPinchLastDist = totalDist;
+            gmTwoPinchLastX = distX;
+            gmTwoPinchLastY = distY;
+        }
+        gmGestureActive = 'two-pinch-extrude';
+        gmRightLastX = gmRightSmX;
+        gmRightLastY = gmRightSmY;
+        return;
+    }
+    if (!rightPinch || !leftPinch) {
+        gmTwoPinchLastDist = 0;
+        gmTwoPinchLastX = 0;
+        gmTwoPinchLastY = 0;
+        gmTwoPinchUndoSaved = false;
+    }
+
+    // --- PINCH = SELECT, then ROTATE (drag) + SCALE (depth) ---
+    // Skip if we're already dragging an anchor handle
+    if (rightPinch && !draggingAnchor) {
+        if (!gmWasFist) {
+            gmFistFrames++;
+            if (gmFistFrames >= 1) {
+                gmWasFist = true;
+                gmPinchStartX = gmRightSmX;
+                gmPinchStartY = gmRightSmY;
+                gmPinchUndoSaved = false;
+                // Measure hand size at pinch start for depth scaling
+                gmPinchStartHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+                // Select object under pointer (use pre-pinch position before fingertip shifted)
+                const ndc = new THREE.Vector2(
+                    (gmPrePinchPointerX / innerWidth) * 2 - 1,
+                    -(gmPrePinchPointerY / innerHeight) * 2 + 1
+                );
+                raycaster.setFromCamera(ndc, camera);
+                const allMeshes = [];
+                for (const entry of sceneObjects) {
+                    allMeshes.push(entry.mesh);
+                    entry.mesh.traverse(child => { if (child.isMesh) allMeshes.push(child); });
+                }
+                const hits = raycaster.intersectObjects(allMeshes, false);
+                if (hits.length > 0) {
+                    let hitObj = hits[0].object;
+                    let entry = null;
+                    while (hitObj) {
+                        entry = sceneObjects.find(o => o.mesh === hitObj);
+                        if (entry) break;
+                        hitObj = hitObj.parent;
+                    }
+                    if (entry) {
+                        clearHoveredObject();
+                        selectObject(entry);
+                        setCommandStatus(`👌 Selected: ${SHAPE_LABELS[entry.name] || entry.name} — drag to rotate, depth to scale`);
+                    }
+                } else if (hoveredObject) {
+                    // If raycast missed but we had a hovered object, select that instead
+                    clearHoveredObject();
+                    selectObject(hoveredObject);
+                    setCommandStatus(`👌 Selected: ${SHAPE_LABELS[hoveredObject.name] || hoveredObject.name} — drag to rotate, depth to scale`);
+                } else if (selectedObject) {
+                    deselectObject();
+                    setCommandStatus('👌 Deselected');
+                }
+            }
+        } else if (selectedObject) {
+            // Pinch held + selected: ROTATE by dragging, SCALE by depth (hand size change)
+            if (!gmPinchUndoSaved) { saveUndo(); gmPinchUndoSaved = true; }
+
+            // --- ROTATE: lateral drag rotates the selected object ---
+            const dx = gmRightSmX - prevX;
+            const dy = gmRightSmY - prevY;
+            if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
+                const angleY = dx * 0.005;
+                const angleX = dy * 0.005;
+                const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                const combinedQ = qX.clone().multiply(qY);
+                selectedObject.mesh.quaternion.premultiply(combinedQ);
+                updateSelectedOutline();
+                setCommandStatus(`👌 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                gmGestureActive = 'rotating';
+            }
+
+            // --- SCALE: hand size change (forward/back depth) scales the object ---
+            const currentHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+            const scaleDelta = currentHandScale - gmPinchStartHandScale;
+            if (Math.abs(scaleDelta) > 0.005) {
+                const scaleFactor = 1 + scaleDelta * 2;
+                selectedObject.mesh.scale.multiplyScalar(Math.max(0.5, Math.min(2.0, scaleFactor)));
+                gmPinchStartHandScale = currentHandScale; // reset baseline for continuous scaling
+                updateSelectedOutline();
+                setCommandStatus(`👌 Scaling ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                gmGestureActive = 'scaling';
+            }
+        }
+        gmGestureActive = gmGestureActive || 'selecting';
+        gmRightLastX = gmRightSmX;
+        gmRightLastY = gmRightSmY;
+        return;
+    }
+    if (!rightPinch) { gmFistFrames = 0; gmWasFist = false; gmPinchUndoSaved = false; }
+
+    // --- OPEN PALM (right hand) = ROTATE selected object or orbit scene ---
+    if (rightOpen && !leftOpen) {
+        const dx = gmRightSmX - prevX;
+        const dy = gmRightSmY - prevY;
+
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            if (selectedObject) {
+                // Rotate only the selected object
+                if (gmGestureActive !== 'rotating') { saveUndo(); }
+                const angleY = dx * 0.005;
+                const angleX = dy * 0.005;
+                const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                const combinedQ = qX.clone().multiply(qY);
+                selectedObject.mesh.quaternion.premultiply(combinedQ);
+                updateSelectedOutline();
+                setCommandStatus(`🖐 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                showOrbitRef();
+                const angleY = dx * 0.005;
+                const angleX = dy * 0.005;
+                const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                if (sceneObjects.length > 0) {
+                    if (gmGestureActive !== 'rotating') { saveUndo(); }
+                    const pivot = new THREE.Vector3();
+                    for (const entry of sceneObjects) pivot.add(entry.mesh.position);
+                    pivot.divideScalar(sceneObjects.length);
+                    const combinedQ = qX.clone().multiply(qY);
+                    for (const entry of sceneObjects) {
+                        const pos = entry.mesh.position.clone().sub(pivot);
+                        pos.applyQuaternion(combinedQ);
+                        entry.mesh.position.copy(pos.add(pivot));
+                        entry.mesh.quaternion.premultiply(combinedQ);
+                    }
+                    updateSelectedOutline();
+                } else {
+                    doCameraOrbit(dx, dy);
+                }
+            }
+        }
+        gmGestureActive = 'rotating';
+        gmRightLastX = gmRightSmX;
+        gmRightLastY = gmRightSmY;
+        return;
+    }
+
+    // Release anchor when gesture ends
+    if (draggingAnchor && !rightFist && !rightPinch) {
+        draggingAnchor = null;
+        anchorDragAxis = null;
+    }
+
+    // --- IDLE: just pointer ---
+    hideOrbitRef();
+    gmGestureActive = 'none';
+    setCommandStatus(`${debugFingers} | Pinch=select Palm=move Fist=extrude`);
+
+    gmRightLastX = gmRightSmX;
+    gmRightLastY = gmRightSmY;
+}
+
+function simulateMouseEvent(type, x, y) {
+    const el = document.elementFromPoint(x, y);
+    if (el) {
+        el.dispatchEvent(new MouseEvent(type, {
+            clientX: x, clientY: y, bubbles: true, cancelable: true
+        }));
+    }
+}
+
+// Count extended fingers on a hand
+function countFingers(hand) {
+    let count = 0;
+
+    // Thumb: tip (4) far from wrist (0) compared to when fist is closed
+    // Measure distance from thumb tip to index finger base (5)
+    // When fist: thumb wraps close to index base. When extended: far away.
+    const thumbTip = hand[4];
+    const pinkyMCP = hand[17];
+    const thumbDist = Math.hypot(thumbTip.x - pinkyMCP.x, thumbTip.y - pinkyMCP.y);
+    // Thumb is extended if it's far from pinky base
+    if (thumbDist > 0.1) count++;
+
+    // Index, Middle, Ring, Pinky: tip higher than PIP = extended
+    const fingerPairs = [
+        [hand[8], hand[6]],   // index: tip vs PIP
+        [hand[12], hand[10]], // middle: tip vs PIP
+        [hand[16], hand[14]], // ring: tip vs PIP
+        [hand[20], hand[18]], // pinky: tip vs PIP
+    ];
+    for (const [tip, pip] of fingerPairs) {
+        if (tip.y < pip.y) count++;
+    }
+    return count;
+}
+
+function clearDebugCanvas() {
+    const canvas = document.getElementById('debug-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawDebugHands(landmarks, handedness) {
+    const canvas = document.getElementById('debug-canvas');
+    if (!canvas) return;
+    canvas.width = innerWidth;
+    canvas.height = innerHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const CONNECTIONS = [
+        [0,1],[1,2],[2,3],[3,4],
+        [0,5],[5,6],[6,7],[7,8],
+        [0,9],[9,10],[10,11],[11,12],
+        [0,13],[13,14],[14,15],[15,16],
+        [0,17],[17,18],[18,19],[19,20],
+        [5,9],[9,13],[13,17],
+    ];
+    const TIPS = new Set([4,8,12,16,20]);
+    const handColors = ['#ff4488', '#44aaff'];
+    const handLabels = ['Left', 'Right'];
+
+    for (let h = 0; h < landmarks.length; h++) {
+        const hand = landmarks[h];
+        const color = handColors[h % 2];
+
+        // Determine handedness label
+        let label = `Hand ${h + 1}`;
+        if (handedness[h] && handedness[h][0]) {
+            // MediaPipe mirrors: "Left" in camera = user's right hand
+            const mpLabel = handedness[h][0].categoryName;
+            label = mpLabel === 'Left' ? '🫲 Right Hand' : '🫱 Left Hand';
+        }
+
+        const pt = (idx) => ({
+            x: (1 - hand[idx].x) * canvas.width,
+            y: hand[idx].y * canvas.height,
+        });
+
+        // Draw skeleton
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 0.8;
+        for (const [a, b] of CONNECTIONS) {
+            const pa = pt(a), pb = pt(b);
+            ctx.beginPath();
+            ctx.moveTo(pa.x, pa.y);
+            ctx.lineTo(pb.x, pb.y);
+            ctx.stroke();
+        }
+
+        // Draw joints
+        ctx.globalAlpha = 1.0;
+        for (let i = 0; i < 21; i++) {
+            const p = pt(i);
+            if (TIPS.has(i)) {
+                ctx.fillStyle = '#ffffff';
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            } else if (i === 0) {
+                ctx.fillStyle = color;
+                ctx.fillRect(p.x - 5, p.y - 5, 10, 10);
+            } else {
+                ctx.fillStyle = color;
+                ctx.globalAlpha = 0.6;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        // Count fingers
+        const fingers = countFingers(hand);
+
+        // Draw hand label + finger count + position-based role
+        const w = pt(0);
+        const wristX = hand[0].x.toFixed(2);
+        const role = hand[0].x > 0.5 ? 'LEFT' : 'RIGHT';
+        ctx.font = 'bold 14px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = 3;
+        const infoText = `${role} (x:${wristX}) · ${fingers}f`;
+        ctx.strokeText(infoText, w.x - 40, w.y + 25);
+        ctx.fillText(infoText, w.x - 40, w.y + 25);
+
+        // Big finger count number near hand center
+        const center = pt(9);
+        ctx.font = 'bold 36px monospace';
+        ctx.fillStyle = color;
+        ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+        ctx.lineWidth = 4;
+        ctx.strokeText(fingers.toString(), center.x - 12, center.y - 20);
+        ctx.fillText(fingers.toString(), center.x - 12, center.y - 20);
+    }
+
+    // Summary text at top
+    ctx.font = 'bold 16px monospace';
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth = 3;
+    const summary = `Hands detected: ${landmarks.length}`;
+    ctx.strokeText(summary, 20, 100);
+    ctx.fillText(summary, 20, 100);
+}
+
+// ============================================================
+// GESTURE POINTER — dwell-to-click UI interaction
+// ============================================================
+const gesturePointerEl = document.getElementById('gesture-pointer');
+const gpRingProgress = gesturePointerEl?.querySelector('.gp-ring-progress');
+const DWELL_DELAY_MS = 500;   // time before countdown starts
+const DWELL_DURATION_MS = 1500; // countdown duration
+let gpVisible = false;
+let gpLastX = 0, gpLastY = 0;
+let gpSmoothX = 0, gpSmoothY = 0;
+let gpHoverTarget = null;
+let gpHoverStartTime = 0;
+let gpDwellStartTime = 0;
+let gpLastClickTime = 0;
+const GP_CLICK_COOLDOWN = 800;  // prevent rapid re-clicks
+const CIRCUMFERENCE = 2 * Math.PI * 18; // matches SVG circle r=18
+
+let gpFrozen = false; // thumbs-up freezes pointer position
+
+// Detect thumbs-up: thumb extended upward, other fingers curled
+function isThumbsUp(hand) {
+    const wrist = hand[0];
+    const thumbTip = hand[4];
+    const indexTip = hand[8];
+    const middleTip = hand[12];
+    const ringTip = hand[16];
+    const pinkyTip = hand[20];
+    // Thumb must be significantly above wrist
+    const thumbUp = (wrist.y - thumbTip.y) > 0.08;
+    // Other fingers must be curled (close to wrist)
+    const othersCurled = [indexTip, middleTip, ringTip, pinkyTip].every(
+        tip => Math.hypot(tip.x - wrist.x, tip.y - wrist.y) < 0.12
+    );
+    return thumbUp && othersCurled;
+}
+
+function updateGesturePointer(hand) {
+    if (!gesturePointerEl) return;
+
+    // Thumbs-up = freeze pointer, hand can move freely
+    if (isThumbsUp(hand)) {
+        if (!gpFrozen) {
+            gpFrozen = true;
+            gesturePointerEl.style.opacity = '0.5';
+        }
+        return; // Don't update position
+    }
+    if (gpFrozen) {
+        gpFrozen = false;
+        gesturePointerEl.style.opacity = '1';
+    }
+
+    const indexTip = hand[8]; // index fingertip = pointer
+    // Convert MediaPipe coords (0-1, mirrored) to screen coords
+    const screenX = (1 - indexTip.x) * innerWidth;
+    const screenY = indexTip.y * innerHeight;
+
+    // Smooth pointer position
+    // Smooth pointer with slight lag for stability
+    gpSmoothX = gpSmoothX * 0.35 + screenX * 0.65;
+    gpSmoothY = gpSmoothY * 0.35 + screenY * 0.65;
+
+    // Show and position pointer
+    if (!gpVisible) {
+        gesturePointerEl.style.display = 'block';
+        gpVisible = true;
+        gpSmoothX = screenX;
+        gpSmoothY = screenY;
+    }
+    gesturePointerEl.style.left = gpSmoothX + 'px';
+    gesturePointerEl.style.top = gpSmoothY + 'px';
+
+    // Check what's under the pointer
+    const elUnder = document.elementFromPoint(gpSmoothX, gpSmoothY);
+    const clickable = elUnder ? elUnder.closest('button, [data-shape], select, input, a, .ws-btn, .splice-icon-btn, .splice-shape-item, .tool-btn, .draw-tool-btn, .add-shape-option') : null;
+
+    const now = performance.now();
+
+    if (clickable) {
+        gesturePointerEl.classList.add('gp-hover');
+
+        if (clickable !== gpHoverTarget) {
+            // Started hovering a new element
+            gpHoverTarget = clickable;
+            gpHoverStartTime = now;
+            gpDwellStartTime = 0;
+            resetDwellRing();
+        } else {
+            const hoverDuration = now - gpHoverStartTime;
+
+            if (hoverDuration > DWELL_DELAY_MS && gpDwellStartTime === 0) {
+                // Start countdown
+                gpDwellStartTime = now;
+            }
+
+            if (gpDwellStartTime > 0) {
+                const dwellProgress = Math.min(1, (now - gpDwellStartTime) / DWELL_DURATION_MS);
+                updateDwellRing(dwellProgress);
+
+                if (dwellProgress >= 1 && (now - gpLastClickTime) > GP_CLICK_COOLDOWN) {
+                    // Countdown complete — trigger click!
+                    gpLastClickTime = now;
+                    clickable.click();
+                    gpHoverTarget = null;
+                    gpDwellStartTime = 0;
+                    resetDwellRing();
+
+                    // Flash the dot green briefly
+                    gesturePointerEl.style.setProperty('--gp-flash', '#44ff44');
+                    setTimeout(() => gesturePointerEl.style.removeProperty('--gp-flash'), 300);
+
+                    setCommandStatus(`Selected: ${clickable.textContent.trim().substring(0, 30)}`);
+                }
+            }
+        }
+    } else {
+        gesturePointerEl.classList.remove('gp-hover');
+        gpHoverTarget = null;
+        gpDwellStartTime = 0;
+        resetDwellRing();
+    }
+}
+
+function updateDwellRing(progress) {
+    if (!gpRingProgress) return;
+    const offset = CIRCUMFERENCE * (1 - progress);
+    gpRingProgress.style.strokeDashoffset = offset;
+}
+
+function resetDwellRing() {
+    if (!gpRingProgress) return;
+    gpRingProgress.style.strokeDashoffset = CIRCUMFERENCE;
+}
+
+function hideGesturePointer() {
+    if (!gesturePointerEl) return;
+    gesturePointerEl.style.display = 'none';
+    gpVisible = false;
+    gpHoverTarget = null;
+    gpDwellStartTime = 0;
+    resetDwellRing();
+}
+
+// Debug overlay
+function drawDebugLandmarks(landmarks) {
+    const canvas = document.getElementById('debug-canvas');
+    if (!canvas) return;
+    canvas.width = innerWidth;
+    canvas.height = innerHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // MediaPipe hand skeleton connections
+    // Each finger: MCP → PIP → DIP → TIP, plus palm connections
+    const CONNECTIONS = [
+        // Thumb
+        [0, 1], [1, 2], [2, 3], [3, 4],
+        // Index
+        [0, 5], [5, 6], [6, 7], [7, 8],
+        // Middle
+        [0, 9], [9, 10], [10, 11], [11, 12],
+        // Ring
+        [0, 13], [13, 14], [14, 15], [15, 16],
+        // Pinky
+        [0, 17], [17, 18], [18, 19], [19, 20],
+        // Palm cross-connections
+        [5, 9], [9, 13], [13, 17],
+    ];
+
+    // Joint types for coloring
+    const TIPS = new Set([4, 8, 12, 16, 20]);
+    const MCPS = new Set([5, 9, 13, 17]);
+    const WRIST = 0;
+
+    const handColors = ['#ff4488', '#44aaff']; // hand 1 = pink, hand 2 = blue
+
+    for (let h = 0; h < landmarks.length; h++) {
+        const hand = landmarks[h];
+        const color = handColors[h % 2];
+
+        // Helper: get screen coords (mirrored)
+        const pt = (idx) => ({
+            x: (1 - hand[idx].x) * canvas.width,
+            y: hand[idx].y * canvas.height,
+        });
+
+        // Draw skeleton wires
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 0.8;
+        for (const [a, b] of CONNECTIONS) {
+            const pa = pt(a), pb = pt(b);
+            ctx.beginPath();
+            ctx.moveTo(pa.x, pa.y);
+            ctx.lineTo(pb.x, pb.y);
+            ctx.stroke();
+        }
+
+        // Draw joints
+        ctx.globalAlpha = 1.0;
+        for (let i = 0; i < 21; i++) {
+            const p = pt(i);
+
+            if (TIPS.has(i)) {
+                // Fingertips — larger, bright filled circle with glow
+                ctx.fillStyle = '#ffffff';
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                // Inner colored dot
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            } else if (i === WRIST) {
+                // Wrist — square anchor
+                ctx.fillStyle = color;
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 6;
+                ctx.fillRect(p.x - 6, p.y - 6, 12, 12);
+                ctx.shadowBlur = 0;
+            } else if (MCPS.has(i)) {
+                // MCP knuckles — medium ring
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.fillStyle = 'rgba(255,255,255,0.4)';
+                ctx.fill();
+            } else {
+                // PIP/DIP joints — small dots
+                ctx.fillStyle = color;
+                ctx.globalAlpha = 0.7;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        // Label fingertips
+        ctx.font = 'bold 10px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        const tipLabels = { 4: 'THB', 8: 'IDX', 12: 'MID', 16: 'RNG', 20: 'PNK' };
+        for (const [idx, label] of Object.entries(tipLabels)) {
+            const p = pt(+idx);
+            ctx.fillText(label, p.x, p.y - 12);
+        }
+
+        // Draw pinch distance line if pinching
+        if (isPinch(hand)) {
+            const thumb = pt(4), index = pt(8);
+            ctx.strokeStyle = '#ffdd57';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(thumb.x, thumb.y);
+            ctx.lineTo(index.x, index.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            // Pinch midpoint dot
+            const mx = (thumb.x + index.x) / 2, my = (thumb.y + index.y) / 2;
+            ctx.fillStyle = '#ffdd57';
+            ctx.shadowColor = '#ffdd57';
+            ctx.shadowBlur = 10;
+            ctx.beginPath();
+            ctx.arc(mx, my, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+
+        // Wrist label with hand index
+        const w = pt(0);
+        ctx.fillStyle = color;
+        ctx.font = 'bold 12px monospace';
+        ctx.fillText(`Hand ${h + 1}`, w.x, w.y + 18);
+    }
+
+    // Gesture + command readout
+    ctx.strokeStyle = 'transparent';
+    const gestureText = document.getElementById('debug-gesture-text');
+    if (gestureText) gestureText.textContent = `Gesture: ${currentGesture || 'None'}`;
+    const commandText = document.getElementById('debug-command-text');
+    if (commandText) commandText.textContent = `Command: ${currentGesture || 'Idle'}`;
+}
+
+// ============================================================
+// 11. MOUSE INTERACTION
+// ============================================================
+let isDragging = false;
+let mouseBtn = -1;
+let lastMouse = { x: 0, y: 0 };
+let sculptHitPoint = null;
+let sculptHitNormal = null;
+let mouseUndoArmed = false;
+let carveHoldActive = false;  // true when click-holding on mesh to carve in
+let carvePoint = null;
+let carveNormal = null;
+let draggingObject = null; // scene object being dragged
+let dragMoved = false; // track if mouse actually moved
+let pendingDeselect = false; // deselect on mouseup only if no drag
+
+// Orbit/pan reference point
+const orbitRefEl = document.getElementById('orbit-ref');
+let orbitRefTimeout = null;
+function showOrbitRef() {
+    if (!orbitRefEl) return;
+    orbitRefEl.style.left = '50%';
+    orbitRefEl.style.top = '50%';
+    orbitRefEl.style.display = 'block';
+    orbitRefEl.classList.add('visible');
+    clearTimeout(orbitRefTimeout);
+}
+function hideOrbitRef() {
+    if (!orbitRefEl) return;
+    orbitRefEl.classList.remove('visible');
+    orbitRefTimeout = setTimeout(() => { orbitRefEl.style.display = 'none'; }, 200);
+}
+
+// ---- Shared camera orbit / pan / zoom functions ----
+
+// Compute orbit pivot: selected object center, or center of largest object
+function getOrbitPivot() {
+    if (selectedObject) {
+        return selectedObject.mesh.position.clone();
+    }
+    if (sceneObjects.length > 0) {
+        // Find the biggest object by bounding box volume
+        let biggest = sceneObjects[0];
+        let biggestSize = 0;
+        for (const entry of sceneObjects) {
+            const box = new THREE.Box3().setFromObject(entry.mesh);
+            const size = box.getSize(new THREE.Vector3());
+            const vol = size.x * size.y * size.z;
+            if (vol > biggestSize) {
+                biggestSize = vol;
+                biggest = entry;
+            }
+        }
+        return biggest.mesh.position.clone();
+    }
+    return orbitTarget.clone();
+}
+
+function doCameraOrbit(dx, dy) {
+    showOrbitRef();
+    const pivot = getOrbitPivot();
+    const angleY = dx * 0.005;
+    const angleX = dy * 0.005;
+    // Rotate camera position around the pivot
+    const offset = camera.position.clone().sub(pivot);
+    // Horizontal: rotate around world Y
+    const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+    offset.applyQuaternion(qY);
+    // Vertical: rotate around camera's right axis
+    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+    offset.applyQuaternion(qX);
+    camera.position.copy(pivot).add(offset);
+    orbitTarget.copy(pivot);
+    camera.lookAt(orbitTarget);
+}
+
+function doCameraPan(dx, dy) {
+    showOrbitRef();
+    const panSpeed = 0.005 * camera.position.distanceTo(orbitTarget);
+    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+    const panOffset = camRight.multiplyScalar(-dx * panSpeed).add(camUp.multiplyScalar(dy * panSpeed));
+    camera.position.add(panOffset);
+    orbitTarget.add(panOffset);
+    camera.lookAt(orbitTarget);
+}
+
+function doCameraZoom(dy) {
+    // Distance-based zoom — move camera along view direction
+    const dir = camera.getWorldDirection(new THREE.Vector3());
+    const dist = camera.position.distanceTo(orbitTarget);
+    const step = dy * 0.003 * dist; // proportional to distance
+    camera.position.addScaledVector(dir, -step);
+    // Clamp minimum/maximum distance
+    const newDist = camera.position.distanceTo(orbitTarget);
+    if (newDist < 0.5) {
+        camera.position.copy(orbitTarget).addScaledVector(dir, -0.5);
+    } else if (newDist > 100) {
+        camera.position.copy(orbitTarget).addScaledVector(dir, -100);
+    }
+}
+
+function resetCamera() {
+    camera.position.set(0, 0, 6);
+    camera.fov = 45;
+    camera.updateProjectionMatrix();
+    orbitTarget.set(0, 0, 0);
+    camera.lookAt(orbitTarget);
+    gmSpinVelX = 0;
+    gmSpinVelY = 0;
+}
+
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+
+renderer.domElement.addEventListener('mousedown', e => {
+    isDragging = true;
+    mouseBtn = e.button;
+    lastMouse = { x: e.clientX, y: e.clientY };
+    mouseUndoArmed = false;
+    dragMoved = false;
+    pendingDeselect = false;
+
+    // Add Shape mode — click to place
+    if (addShapeMode && currentAppMode === 'model' && e.button === 0) {
+        if (addShapeVisible) {
+            confirmAddShape();
+        }
+        isDragging = false;
+        return;
+    }
+
+    if (currentAppMode === 'model') {
+        const ndc = new THREE.Vector2(
+            (e.clientX / innerWidth) * 2 - 1,
+            -(e.clientY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+
+        // Check anchor handles first (for scale/extrude)
+        if (selectedAnchors.length > 0 && e.button === 0) {
+            const anchorHits = raycaster.intersectObjects(selectedAnchors);
+            if (anchorHits.length > 0) {
+                const hit = anchorHits[0].object;
+                draggingAnchor = hit;
+                anchorDragAxis = hit.userData.axis;
+                anchorDragSign = hit.userData.sign;
+                if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+                isDragging = true;
+                setCommandStatus(`Scaling ${anchorDragAxis.toUpperCase()} axis...`);
+                return;
+            }
+        }
+
+        // Check scene objects first (separate added shapes)
+        if (sceneObjects.length > 0 && e.button === 0) {
+            const objMeshes = sceneObjects.map(o => o.mesh);
+            const objHits = raycaster.intersectObjects(objMeshes, true);
+            if (objHits.length > 0) {
+                // Walk up to find which scene object was hit (could hit wireframe child)
+                let hitObj = objHits[0].object;
+                let entry = null;
+                while (hitObj) {
+                    entry = sceneObjects.find(o => o.mesh === hitObj);
+                    if (entry) break;
+                    hitObj = hitObj.parent;
+                }
+                if (entry) {
+                    if (entry !== selectedObject) {
+                        // Clicked a different object — select it
+                        selectObject(entry);
+                    }
+                    // Don't set draggingObject on left click — let left drag rotate
+                    // Right-click drag will move via the right-drag handler
+                    isDragging = true;
+                    return;
+                }
+            }
+        }
+
+        // Right-click + selected object = set up for move drag
+        if (e.button === 2 && selectedObject) {
+            draggingObject = selectedObject;
+        }
+
+        // Click empty space = mark for deselect (only on mouseup if no drag)
+        if (selectedObject && e.button === 0) {
+            const mainHits = raycaster.intersectObject(mesh);
+            const objMeshes = sceneObjects.map(o => o.mesh);
+            const objHits = raycaster.intersectObjects(objMeshes, true);
+            if (mainHits.length === 0 && objHits.length === 0) {
+                pendingDeselect = true;
+            }
+        }
+
+        const hits = raycaster.intersectObject(mesh);
+
+        if (hits.length && e.button === 0) {
+            sculptHitPoint = hits[0].point.clone();
+            sculptHitNormal = getHitNormal(hits[0]).clone();
+            const hitNormW = hits[0].face?.normal
+                ? hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize()
+                : new THREE.Vector3(0, 0, 1);
+
+            // Shift+click = duplicate region
+            if (e.shiftKey) {
+                startDuplicate(hits[0].point, hitNormW);
+                isDragging = true;
+                return;
+            }
+
+            // Click+hold on mesh (no modifier) = start carve-in
+            if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+                carveHoldActive = true;
+                carvePoint = hits[0].point.clone();
+                carveNormal = hitNormW.clone().negate(); // push inward
+                if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            }
+
+            if (activeTool === 'distance') {
+                measureDistance(hits[0].point.clone());
+                isDragging = false;
+                return;
+            }
+        }
+    } else if (currentAppMode === 'abstract') {
+        abstractDragging = true;
+        abstractDragStart = { x: e.clientX, y: e.clientY };
+        const ndc = new THREE.Vector2(
+            (e.clientX / innerWidth) * 2 - 1,
+            -(e.clientY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObject(mesh);
+        if (hits.length) abstractHitPoint = hits[0].point.clone();
+    } else if (currentAppMode === 'freeform') {
+        // Freeform mouse: click to select, right-click to set up move
+        const ndc = new THREE.Vector2(
+            (e.clientX / innerWidth) * 2 - 1,
+            -(e.clientY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        if (sceneObjects.length > 0 && e.button === 0) {
+            const objMeshes = sceneObjects.map(o => o.mesh);
+            const objHits = raycaster.intersectObjects(objMeshes, true);
+            if (objHits.length > 0) {
+                let hitObj = objHits[0].object;
+                let entry = null;
+                while (hitObj) {
+                    entry = sceneObjects.find(o => o.mesh === hitObj);
+                    if (entry) break;
+                    hitObj = hitObj.parent;
+                }
+                if (entry && entry !== selectedObject) {
+                    selectObject(entry);
+                }
+                isDragging = true;
+                return;
+            }
+        }
+        if (e.button === 2 && selectedObject) {
+            draggingObject = selectedObject;
+        }
+        if (selectedObject && e.button === 0) {
+            const objMeshes = sceneObjects.map(o => o.mesh);
+            const objHits = raycaster.intersectObjects(objMeshes, true);
+            if (objHits.length === 0) {
+                pendingDeselect = true;
+            }
+        }
+    }
+});
+
+renderer.domElement.addEventListener('mousemove', e => {
+    // Add Shape mode — hover to position preview
+    if (addShapeMode && currentAppMode === 'model' && !isDragging) {
+        const ndc = new THREE.Vector2(
+            (e.clientX / innerWidth) * 2 - 1,
+            -(e.clientY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObjects([mesh]);
+        if (hits.length) {
+            const hitNorm = hits[0].face?.normal
+                ? hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize()
+                : new THREE.Vector3(0, 0, 1);
+            addShapeHitNormal.copy(hitNorm);
+            addShapeSurfaceHit.copy(hits[0].point);
+            const surfaceOffset = addShapeBaseRadius * addShapeScale * 0.35;
+            addShapePosition.copy(hits[0].point).addScaledVector(hitNorm, surfaceOffset);
+            updateAddShapePreview(addShapePosition, addShapeScale);
+        } else {
+            const dir = new THREE.Vector3();
+            raycaster.ray.direction.normalize();
+            dir.copy(raycaster.ray.direction).multiplyScalar(4);
+            addShapePosition.copy(raycaster.ray.origin).add(dir);
+            addShapeSurfaceHit.copy(addShapePosition);
+            updateAddShapePreview(addShapePosition, addShapeScale);
+        }
+        return;
+    }
+
+    // Face highlight on hover (not dragging, model mode)
+    if (!isDragging && currentAppMode === 'model' && !addShapeMode) {
+        const ndc = new THREE.Vector2(
+            (e.clientX / innerWidth) * 2 - 1,
+            -(e.clientY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObject(mesh);
+        if (hits.length) {
+            const hitNorm = hits[0].face?.normal
+                ? hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize()
+                : new THREE.Vector3(0, 0, 1);
+            highlightFacesAt(hits[0].point, hitNorm);
+        } else {
+            hideHighlight();
+        }
+        return;
+    }
+
+    if (!isDragging) return;
+
+    // Anchor handle drag = scale along axis
+    if (draggingAnchor && selectedObject) {
+        const dx = e.clientX - lastMouse.x;
+        const dy = e.clientY - lastMouse.y;
+        lastMouse = { x: e.clientX, y: e.clientY };
+        dragMoved = true;
+        const scaleSpeed = 0.005;
+        // Use dominant mouse direction for scaling
+        const delta = (Math.abs(dx) > Math.abs(dy) ? dx : -dy) * scaleSpeed * anchorDragSign;
+        const s = selectedObject.mesh.scale;
+        if (anchorDragAxis === 'x') s.x = Math.max(0.05, s.x + delta);
+        else if (anchorDragAxis === 'y') s.y = Math.max(0.05, s.y + delta);
+        else if (anchorDragAxis === 'z') s.z = Math.max(0.05, s.z + delta);
+        updateSelectedOutline();
+        setCommandStatus(`Scale ${anchorDragAxis.toUpperCase()}: ${s[anchorDragAxis].toFixed(2)}`);
+        return;
+    }
+
+    // Drag selected scene object — Shift+drag = scale along axis, normal drag = move
+    if (draggingObject) {
+        const dx = e.clientX - lastMouse.x;
+        const dy = e.clientY - lastMouse.y;
+        lastMouse = { x: e.clientX, y: e.clientY };
+
+        if (e.shiftKey) {
+            // Shift+drag = stretch/scale along dominant axis
+            const scaleSpeed = 0.005;
+            if (Math.abs(dx) > Math.abs(dy)) {
+                // Horizontal drag = scale X
+                draggingObject.mesh.scale.x = Math.max(0.05, draggingObject.mesh.scale.x + dx * scaleSpeed);
+            } else {
+                // Vertical drag = scale Y
+                draggingObject.mesh.scale.y = Math.max(0.05, draggingObject.mesh.scale.y - dy * scaleSpeed);
+            }
+            updateSelectedOutline();
+            const s = draggingObject.mesh.scale;
+            setCommandStatus(`Scale: X=${s.x.toFixed(2)} Y=${s.y.toFixed(2)} Z=${s.z.toFixed(2)} — Shift+drag to deform`);
+        } else {
+            // Normal drag = move
+            const moveSpeed = 0.008;
+            const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+            const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+            const invMeshRot = new THREE.Matrix4().extractRotation(mesh.matrixWorld).invert();
+            right.applyMatrix4(invMeshRot);
+            up.applyMatrix4(invMeshRot);
+            draggingObject.mesh.position.addScaledVector(right, dx * moveSpeed);
+            draggingObject.mesh.position.addScaledVector(up, -dy * moveSpeed);
+            updateSelectedOutline();
+            setCommandStatus(`Moving ${SHAPE_LABELS[draggingObject.name] || draggingObject.name}...`);
+        }
+        return;
+    }
+
+    // Stop carving when mouse moves (dragging = extrude, not carve)
+    if (carveHoldActive) {
+        const dx = e.clientX - lastMouse.x;
+        const dy = e.clientY - lastMouse.y;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+            carveHoldActive = false;
+        }
+    }
+
+    // Duplicate mode — drag moves the preview
+    if (dupMode) {
+        updateDuplicate(e.clientX, e.clientY);
+        return;
+    }
+
+    // Hide highlight during drag
+    hideHighlight();
+    dragMoved = true;
+    const dx = e.clientX - lastMouse.x;
+    const dy = e.clientY - lastMouse.y;
+    lastMouse = { x: e.clientX, y: e.clientY };
+
+    if (currentAppMode === 'model') {
+        if (mouseBtn === 2) {
+            // Right drag → pan camera (or move selected object)
+            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            if (selectedObject) {
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                const moveSpeed = 0.005 * camera.position.distanceTo(selectedObject.mesh.position);
+                selectedObject.mesh.position.add(camRight.clone().multiplyScalar(dx * moveSpeed));
+                selectedObject.mesh.position.add(camUp.clone().multiplyScalar(-dy * moveSpeed));
+                updateSelectedOutline();
+                setCommandStatus(`Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                doCameraPan(dx, dy);
+            }
+        } else if (mouseBtn === 0) {
+            // Left drag → rotate selected object, or rotate all objects
+            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            showOrbitRef();
+            const angleY = dx * 0.005;
+            const angleX = dy * 0.005;
+            const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+            const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+
+            if (selectedObject) {
+                selectedObject.mesh.quaternion.premultiply(qY).premultiply(qX);
+                updateSelectedOutline();
+                setCommandStatus(`Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else if (sceneObjects.length > 0) {
+                const pivot = new THREE.Vector3();
+                for (const entry of sceneObjects) pivot.add(entry.mesh.position);
+                pivot.divideScalar(sceneObjects.length);
+                const combinedQ = qX.clone().multiply(qY);
+                for (const entry of sceneObjects) {
+                    const pos = entry.mesh.position.clone().sub(pivot);
+                    pos.applyQuaternion(combinedQ);
+                    entry.mesh.position.copy(pos.add(pivot));
+                    entry.mesh.quaternion.premultiply(combinedQ);
+                }
+                updateSelectedOutline();
+            } else {
+                doCameraOrbit(dx, dy);
+            }
+        }
+    } else if (currentAppMode === 'freeform') {
+        if (mouseBtn === 2) {
+            // Right drag → move selected object or pan camera
+            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            if (selectedObject) {
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                const moveSpeed = 0.005 * camera.position.distanceTo(selectedObject.mesh.position);
+                selectedObject.mesh.position.add(camRight.clone().multiplyScalar(dx * moveSpeed));
+                selectedObject.mesh.position.add(camUp.clone().multiplyScalar(-dy * moveSpeed));
+                updateSelectedOutline();
+                setCommandStatus(`Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                doCameraPan(dx, dy);
+            }
+        } else if (mouseBtn === 0) {
+            // Left drag → rotate selected or orbit camera
+            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            showOrbitRef();
+            const angleY = dx * 0.005;
+            const angleX = dy * 0.005;
+            const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+            const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+            if (selectedObject) {
+                selectedObject.mesh.quaternion.premultiply(qY).premultiply(qX);
+                updateSelectedOutline();
+                setCommandStatus(`Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                doCameraOrbit(dx, dy);
+            }
+        }
+    } else if (currentAppMode === 'abstract') {
+        if (abstractDragging && abstractHitPoint) {
+            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            // Pause breathing while sculpting so it doesn't fight
+            abstractAnimating = false;
+            if (e.shiftKey) {
+                const normal = abstractHitPoint.clone().normalize();
+                extrudeAt(abstractHitPoint, normal, -dy * 0.005);
+            } else {
+                extrudeAt(abstractHitPoint, abstractHitPoint.clone().normalize(), -dy * 0.005);
+            }
+            // Update rest positions so animation incorporates changes
+            if (abstractRestPositions) {
+                abstractRestPositions = new Float32Array(mesh.geometry.attributes.position.array);
+            }
+            // Re-apply colors to prevent black
+            applyBlobGradient();
+        } else {
+            mesh.rotation.y += dx * 0.01;
+            mesh.rotation.x += dy * 0.01;
+        }
+    }
+});
+
+renderer.domElement.addEventListener('mouseup', () => {
+    if (dupMode) {
+        confirmDuplicate();
+    }
+    // Only deselect if it was a click (no drag movement)
+    if (pendingDeselect && !dragMoved) {
+        deselectObject();
+    }
+    pendingDeselect = false;
+    draggingObject = null;
+    draggingAnchor = null;
+    anchorDragAxis = null;
+    dragMoved = false;
+    isDragging = false;
+    hideOrbitRef();
+    mouseBtn = -1;
+    sculptHitPoint = null;
+    sculptHitNormal = null;
+    abstractDragging = false;
+    abstractHitPoint = null;
+    mouseUndoArmed = false;
+    carveHoldActive = false;
+    carvePoint = null;
+    carveNormal = null;
+    if (currentAppMode === 'abstract' && !abstractAnimating) {
+        abstractAnimating = true;
+    }
+});
+
+renderer.domElement.addEventListener('click', e => {
+    if (currentAppMode === 'model' && e.altKey) {
+        mirrorMesh('x');
+    }
+});
+
+renderer.domElement.addEventListener('dblclick', () => {
+    setCommandStatus('Selection cleared');
+});
+
+renderer.domElement.addEventListener('wheel', e => {
+    if (addShapeMode && currentAppMode === 'model') {
+        // Scroll to resize preview
+        e.preventDefault();
+        addShapeScale = Math.max(0.1, Math.min(3.0, addShapeScale - e.deltaY * 0.003));
+        if (addShapePreviewMesh) {
+            addShapePreviewMesh.scale.setScalar(addShapeScale);
+            recomputeAddShapePosition();
+        }
+        setCommandStatus(`Add Shape size: ${addShapeScale.toFixed(2)}`);
+        return;
+    }
+    // Always zoom camera with scroll wheel
+    if (currentAppMode === 'abstract') {
+        mesh.scale.multiplyScalar(1 - e.deltaY * 0.001);
+    } else {
+        e.preventDefault();
+        doCameraZoom(e.deltaY * 0.5);
+    }
+}, { passive: false });
+const sketchCanvas = document.getElementById('sketch-canvas');
+if (sketchCanvas) {
+    sketchCanvas.addEventListener('mousedown', e => {
+        if (currentAppMode !== 'sketch') return;
+        saveSketchUndo();
+        isSketchDrawing = true;
+        lastSketchPt = null;
+        sketchStroke(e.clientX, e.clientY);
+    });
+    sketchCanvas.addEventListener('mousemove', e => {
+        if (!isSketchDrawing || currentAppMode !== 'sketch') return;
+        sketchStroke(e.clientX, e.clientY);
+    });
+    sketchCanvas.addEventListener('mouseup', () => { isSketchDrawing = false; lastSketchPt = null; });
+    sketchCanvas.addEventListener('mouseleave', () => { isSketchDrawing = false; lastSketchPt = null; });
+
+    // Touch support
+    sketchCanvas.addEventListener('touchstart', e => {
+        if (currentAppMode !== 'sketch') return;
+        e.preventDefault();
+        saveSketchUndo();
+        isSketchDrawing = true; lastSketchPt = null;
+        sketchStroke(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: false });
+    sketchCanvas.addEventListener('touchmove', e => {
+        if (!isSketchDrawing || currentAppMode !== 'sketch') return;
+        e.preventDefault();
+        sketchStroke(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: false });
+    sketchCanvas.addEventListener('touchend', () => { isSketchDrawing = false; lastSketchPt = null; });
+}
+
+// ============================================================
+// 12. UI WIRING
+// ============================================================
+
+// Mode tabs
+document.querySelectorAll('.ws-btn').forEach(btn => {
+    btn.addEventListener('click', () => applyAppMode(btn.dataset.appmode));
+});
+
+// Shape menu
+const shapeMenu = document.getElementById('splice-shape-menu');
+const shapeTrigger = document.getElementById('splice-shape-trigger');
+if (shapeTrigger) {
+    shapeTrigger.addEventListener('click', () => {
+        shapeMenu.classList.toggle('open');
+    });
+}
+document.querySelectorAll('.splice-shape-item').forEach(item => {
+    item.addEventListener('click', () => {
+        saveUndo();
+        setShape(item.dataset.shape);
+        shapeMenu.classList.remove('open');
+    });
+});
+
+function syncShapeUI(name) {
+    const label = document.getElementById('splice-shape-label');
+    if (label) label.textContent = SHAPE_LABELS[name] || name;
+}
+
+// Toolbar tool buttons
+document.querySelectorAll('.tool-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        // Exit add-shape mode when switching to any other tool
+        if (btn.dataset.tool !== 'addshape' && addShapeMode) {
+            exitAddShapeMode();
+        }
+        document.querySelectorAll('.tool-btn').forEach(b => {
+            if (b.id !== 'add-shape-btn') b.classList.remove('active');
+        });
+        if (btn.dataset.tool === 'addshape') {
+            const picker = document.getElementById('add-shape-picker');
+            if (addShapeMode) {
+                exitAddShapeMode();
+            } else {
+                // Show shape picker
+                if (picker) picker.style.display = picker.style.display === 'none' ? 'flex' : 'none';
+            }
+            return;
+        }
+        btn.classList.add('active');
+        activeTool = btn.dataset.tool;
+        setCommandStatus(`Tool: ${activeTool}`);
+    });
+});
+
+// Add Shape picker options
+document.querySelectorAll('.add-shape-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const shape = btn.dataset.addshape;
+        document.getElementById('add-shape-picker').style.display = 'none';
+        document.querySelectorAll('.tool-btn').forEach(b => {
+            if (b.id !== 'add-shape-btn') b.classList.remove('active');
+        });
+        enterAddShapeMode(shape);
+    });
+});
+
+// Quick commands
+document.querySelectorAll('[data-quick-command]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const cmd = btn.dataset.quickCommand;
+        if (cmd === 'wireframe') {
+            material.wireframe = !material.wireframe;
+            material.needsUpdate = true;
+        } else if (cmd === 'reset') {
+            saveUndo();
+            setShape(currentShape);
+            resetCamera();
+        }
+    });
+});
+
+// Undo button
+document.getElementById('undo-btn')?.addEventListener('click', undo);
+
+// STL Export
+document.getElementById('export-stl-btn')?.addEventListener('click', exportSTL);
+document.getElementById('merge-all-btn')?.addEventListener('click', mergeAllObjects);
+document.getElementById('select-all-btn')?.addEventListener('click', selectAllObjects);
+document.getElementById('ff-select-all-btn')?.addEventListener('click', selectAllObjects);
+// New project — clears canvas, asks to save first if unsaved
+function newModelProject() {
+    if (sceneObjects.length > 0) {
+        const save = confirm('Save current work before creating a new project?');
+        if (save) saveProject();
+    }
+    // Clear all scene objects
+    for (const entry of [...sceneObjects]) {
+        removeSceneObject(entry);
+    }
+    deselectObject();
+    // Reset main mesh to empty
+    if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+    const emptyGeo = new THREE.BufferGeometry();
+    emptyGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+    mesh = new THREE.Mesh(emptyGeo, material);
+    scene.add(mesh);
+    mesh.position.set(0, 0, 0);
+    mesh.rotation.set(0, 0, 0);
+    mesh.scale.set(1, 1, 1);
+    currentProjectId = null;
+    resetCamera();
+    setCommandStatus('New project — canvas cleared');
+}
+
+function newSketchProject() {
+    const canvas = document.getElementById('sketch-canvas');
+    const hasContent = canvas && canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data.some((v, i) => i % 4 === 3 ? false : v !== 255);
+    if (hasContent) {
+        const save = confirm('Save current sketch before creating a new one?');
+        if (save) saveSketchProject();
+    }
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    currentProjectId = null;
+    setCommandStatus('New sketch — canvas cleared');
+}
+
+document.getElementById('new-project-btn')?.addEventListener('click', newModelProject);
+document.getElementById('sketch-new-btn')?.addEventListener('click', newSketchProject);
+document.getElementById('save-btn')?.addEventListener('click', saveProject);
+document.getElementById('save-as-btn')?.addEventListener('click', saveAsProject);
+
+// Clipboard for copy/cut/paste
+let clipboardObject = null; // { name, position, scale, rotation }
+
+// Keyboard shortcuts
+// Release keyboard gesture mode on keyup
+let gmSpaceDownTime = 0; // timestamp when spacebar was pressed
+
+window.addEventListener('keyup', e => {
+    if (gmKeyboardMode >= 0 && e.key >= '1' && e.key <= '4') {
+        gmReleaseMouseIfHeld();
+        gmKeyboardMode = -1;
+        hideOrbitRef();
+    }
+    // Spacebar release
+    if (e.key === ' ' && gmMouseDown && gmMouseButton === 0) {
+        const holdDuration = performance.now() - gmSpaceDownTime;
+        if (holdDuration < 250) {
+            // Short press = single click at cursor position
+            gmReleaseMouseIfHeld();
+            hideOrbitRef();
+            // Fire a click at the cursor position
+            const canvas = renderer.domElement;
+            canvas.dispatchEvent(new MouseEvent('mousedown', {
+                clientX: gmRightSmX, clientY: gmRightSmY,
+                button: 0, buttons: 1, bubbles: true, cancelable: true
+            }));
+            canvas.dispatchEvent(new MouseEvent('mouseup', {
+                clientX: gmRightSmX, clientY: gmRightSmY,
+                button: 0, buttons: 0, bubbles: true, cancelable: true
+            }));
+            setCommandStatus('Click!');
+        } else {
+            // Long press = was dragging, just release
+            gmReleaseMouseIfHeld();
+            hideOrbitRef();
+        }
+    }
+});
+
+window.addEventListener('keydown', e => {
+    if (e.target.closest('input, textarea')) return;
+
+    // Spacebar = left click (works anytime, not just free move)
+    if (e.key === ' ') {
+        e.preventDefault();
+        if (!gmMouseDown || gmMouseButton !== 0) {
+            gmReleaseMouseIfHeld();
+            gmMouseDown = true;
+            gmMouseButton = 0;
+            gmSpaceDownTime = performance.now();
+            setCommandStatus('Space: Left click hold');
+        }
+        return;
+    }
+
+    // 1-5 keys = activate gesture mode directly (no left hand needed)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key >= '1' && e.key <= '4') {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx >= 0 && idx < gmSlots.length) {
+            const mode = gmSlots[idx];
+            gmActiveSlot = idx;
+            if (mode === 'free') {
+                // Toggle free move — no cooldown for keyboard
+                gmFreezeCursor = !gmFreezeCursor;
+                gmKeyboardMode = -1;
+                setCommandStatus(gmFreezeCursor ? 'Free move ON' : 'Free move OFF');
+            } else if (mode === 'leftclick') {
+                gmKeyboardMode = 0;
+                gmReleaseMouseIfHeld();
+                gmMouseDown = true;
+                gmMouseButton = 0;
+                setCommandStatus('Keyboard: Left click hold');
+            } else if (mode === 'rightclick') {
+                gmKeyboardMode = 2;
+                gmReleaseMouseIfHeld();
+                gmMouseDown = true;
+                gmMouseButton = 2;
+                setCommandStatus('Keyboard: Right click hold');
+            } else if (mode === 'zoom') {
+                gmKeyboardMode = 3;
+                gmReleaseMouseIfHeld();
+                gmMouseDown = true;
+                gmMouseButton = 3;
+                setCommandStatus('Keyboard: Zoom');
+            } else {
+                gmKeyboardMode = -1;
+                setCommandStatus(`Mode: ${mode}`);
+            }
+            updateGMSlotUI();
+        }
+        return;
+    }
+
+    // 0 key = reset camera view
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key === '0') {
+        resetCamera();
+        setCommandStatus('Camera reset');
+        return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        if (currentAppMode === 'sketch') {
+            undoSketch();
+        } else {
+            undo();
+        }
+    }
+
+    // Ctrl+A = Select all objects
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        if (currentAppMode === 'model' || currentAppMode === 'freeform') {
+            selectAllObjects();
+        }
+    }
+
+    // Ctrl+N = New project
+    if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault();
+        if (currentAppMode === 'sketch') newSketchProject();
+        else newModelProject();
+    }
+
+    // Ctrl+S = Save, Ctrl+Shift+S = Save As (works in both model and sketch)
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (currentAppMode === 'sketch') {
+            if (e.shiftKey) saveSketchAsProject();
+            else saveSketchProject();
+        } else {
+            if (e.shiftKey) saveAsProject();
+            else saveProject();
+        }
+    }
+
+    // Copy: Ctrl+C
+    if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selectedObject) {
+        e.preventDefault();
+        clipboardObject = {
+            name: selectedObject.name,
+            position: selectedObject.mesh.position.clone(),
+            scale: selectedObject.mesh.scale.x,
+            rotation: selectedObject.mesh.rotation.clone(),
+        };
+        setCommandStatus(`Copied ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+    }
+
+    // Cut: Ctrl+X
+    if ((e.ctrlKey || e.metaKey) && e.key === 'x' && selectedObject) {
+        e.preventDefault();
+        clipboardObject = {
+            name: selectedObject.name,
+            position: selectedObject.mesh.position.clone(),
+            scale: selectedObject.mesh.scale.x,
+            rotation: selectedObject.mesh.rotation.clone(),
+        };
+        const name = selectedObject.name;
+        removeSceneObject(selectedObject);
+        setCommandStatus(`Cut ${SHAPE_LABELS[name] || name}`);
+    }
+
+    // Paste: Ctrl+V
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v' && clipboardObject) {
+        e.preventDefault();
+        const offset = new THREE.Vector3(0.3, 0.3, 0);
+        const newPos = clipboardObject.position.clone().add(offset);
+        const worldPos = newPos.clone().applyMatrix4(mesh.matrixWorld);
+        const entry = addSceneObject(clipboardObject.name, worldPos, clipboardObject.scale, clipboardObject.rotation);
+        // Override position to local since addSceneObject converts from world
+        entry.mesh.position.copy(newPos);
+        selectObject(entry);
+        setCommandStatus(`Pasted ${SHAPE_LABELS[clipboardObject.name] || clipboardObject.name}`);
+    }
+
+    if (e.key === 'Escape') {
+        if (addShapeMode) { exitAddShapeMode(); }
+        deselectObject();
+        setCommandStatus('Ready');
+    }
+
+    // Delete selected object
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedObject) {
+        e.preventDefault();
+        const name = selectedObject.name;
+        removeSceneObject(selectedObject);
+        setCommandStatus(`Deleted ${SHAPE_LABELS[name] || name}`);
+    }
+
+    // Rotate add-shape preview with keyboard
+    if (addShapeMode && addShapePreviewMesh) {
+        const step = Math.PI / 12; // 15 degrees per press
+        let changed = false;
+        if (e.key === 'q' || e.key === 'Q') { addShapeRotation.z += step; changed = true; }
+        if (e.key === 'e' || e.key === 'E') { addShapeRotation.z -= step; changed = true; }
+        if (e.key === 'r' || e.key === 'R' || e.key === 'ArrowUp') { addShapeRotation.x += step; changed = true; }
+        if (e.key === 'f' || e.key === 'F' || e.key === 'ArrowDown') { addShapeRotation.x -= step; changed = true; }
+        if (e.key === 'ArrowLeft') { addShapeRotation.y += step; changed = true; }
+        if (e.key === 'ArrowRight') { addShapeRotation.y -= step; changed = true; }
+        if (changed) {
+            e.preventDefault();
+            updateAddShapePreview(addShapePosition, addShapeScale);
+            const deg = (r) => Math.round(r * 180 / Math.PI);
+            setCommandStatus(`Rotate: X${deg(addShapeRotation.x)}° Y${deg(addShapeRotation.y)}° Z${deg(addShapeRotation.z)}° — Q/E roll, R/F tilt, ←→ spin`);
+        }
+    }
+});
+
+// Texture selector — applies to selected object or main mesh
+document.getElementById('texture-select')?.addEventListener('change', e => {
+    const t = TEXTURES[e.target.value];
+    if (!t) return;
+    if (selectedObject) {
+        Object.assign(selectedObject.mesh.material, t);
+        selectedObject.mesh.material.needsUpdate = true;
+    } else {
+        applyTexture(e.target.value);
+    }
+});
+
+// Model color wheel — applies to selected object or main mesh
+document.getElementById('model-color-wheel')?.addEventListener('input', e => {
+    if (selectedObject) {
+        selectedObject.mesh.material.color.set(e.target.value);
+        selectedObject.mesh.material.needsUpdate = true;
+    } else {
+        material.color.set(e.target.value);
+        material.needsUpdate = true;
+    }
+});
+
+// Abstract color wheel
+document.getElementById('abstract-color-wheel')?.addEventListener('input', e => {
+    material.color.set(e.target.value);
+    material.needsUpdate = true;
+    if (currentAppMode === 'abstract') applyBlobGradient();
+});
+
+// Sketch color wheel
+document.getElementById('sketch-color-wheel')?.addEventListener('input', e => {
+    sketchColor = e.target.value;
+});
+
+// Sketch tool buttons
+document.querySelectorAll('.draw-tool-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.draw-tool-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        sketchTool = btn.dataset.drawtool;
+    });
+});
+
+// Gradient panels
+document.getElementById('gradient-btn')?.addEventListener('click', () => {
+    document.getElementById('gradient-panel').style.display = 'block';
+});
+document.getElementById('abstract-gradient-btn')?.addEventListener('click', () => {
+    document.getElementById('gradient-panel').style.display = 'block';
+});
+document.getElementById('grad-close')?.addEventListener('click', () => {
+    document.getElementById('gradient-panel').style.display = 'none';
+});
+document.getElementById('grad-apply')?.addEventListener('click', () => {
+    // Apply gradient as vertex colors
+    if (!mesh) return;
+    const pos = mesh.geometry.attributes.position;
+    const c1 = new THREE.Color(document.getElementById('grad-color1').value);
+    const c2 = new THREE.Color(document.getElementById('grad-color2').value);
+    const c3 = new THREE.Color(document.getElementById('grad-color3').value);
+    const type = document.getElementById('gradient-type').value;
+    const colors = new Float32Array(pos.count * 3);
+    let yMin = Infinity, yMax = -Infinity;
+    for (let i = 0; i < pos.count; i++) {
+        const y = pos.getY(i);
+        if (y < yMin) yMin = y;
+        if (y > yMax) yMax = y;
+    }
+    const range = Math.max(yMax - yMin, 0.01);
+    for (let i = 0; i < pos.count; i++) {
+        let t;
+        if (type === 'radial') {
+            const x = pos.getX(i), z = pos.getZ(i);
+            t = Math.min(1, Math.sqrt(x * x + z * z) / 2);
+        } else if (type === 'angular') {
+            const x = pos.getX(i), z = pos.getZ(i);
+            t = (Math.atan2(z, x) + Math.PI) / (2 * Math.PI);
+        } else {
+            t = (pos.getY(i) - yMin) / range;
+        }
+        const c = new THREE.Color();
+        if (t < 0.5) c.lerpColors(c1, c2, t * 2);
+        else c.lerpColors(c2, c3, (t - 0.5) * 2);
+        colors[i * 3] = c.r;
+        colors[i * 3 + 1] = c.g;
+        colors[i * 3 + 2] = c.b;
+    }
+    mesh.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    material.vertexColors = true;
+    material.needsUpdate = true;
+    document.getElementById('gradient-panel').style.display = 'none';
+    setCommandStatus('Gradient applied');
+});
+
+// Sketch export
+document.getElementById('sketch-export-btn')?.addEventListener('click', () => {
+    document.getElementById('sketch-export-panel').style.display = 'block';
+});
+document.getElementById('export-cancel')?.addEventListener('click', () => {
+    document.getElementById('sketch-export-panel').style.display = 'none';
+});
+document.getElementById('export-confirm')?.addEventListener('click', () => {
+    const template = document.getElementById('export-template').value;
+    exportSketchSVG(template);
+    document.getElementById('sketch-export-panel').style.display = 'none';
+});
+
+// Apply sketch as texture to 3D model
+document.getElementById('sketch-apply-btn')?.addEventListener('click', () => {
+    applySketchAsTexture();
+});
+
+function applySketchAsTexture() {
+    const canvas = document.getElementById('sketch-canvas');
+    if (!canvas) { setCommandStatus('No sketch canvas'); return; }
+
+    // Create texture from sketch canvas
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+
+    // Switch to 3D model mode
+    applyAppMode('model');
+
+    // Apply to selected object or all objects
+    if (selectedObject) {
+        selectedObject.mesh.material = selectedObject.mesh.material.clone();
+        selectedObject.mesh.material.map = texture;
+        selectedObject.mesh.material.needsUpdate = true;
+        setCommandStatus(`Applied sketch to ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+    } else if (sceneObjects.length > 0) {
+        for (const entry of sceneObjects) {
+            entry.mesh.material = entry.mesh.material.clone();
+            entry.mesh.material.map = texture.clone();
+            entry.mesh.material.needsUpdate = true;
+        }
+        setCommandStatus('Applied sketch to all objects');
+    } else {
+        // Apply to main mesh
+        material.map = texture;
+        material.needsUpdate = true;
+        setCommandStatus('Applied sketch as texture');
+    }
+}
+
+// Check mesh button
+document.querySelector('[data-tool="check"]')?.addEventListener('click', checkMesh);
+
+// --- Loading overlay helpers ---
+function showLoading(text) {
+    const el = document.getElementById('loading-overlay');
+    if (el) { el.style.display = 'flex'; el.querySelector('.loading-text').textContent = text || 'Loading...'; }
+}
+function hideLoading() {
+    const el = document.getElementById('loading-overlay');
+    if (el) el.style.display = 'none';
+}
+
+// --- Error toast ---
+function showError(msg, duration = 4000) {
+    const el = document.getElementById('error-toast');
+    if (!el) return;
+    el.textContent = msg;
+    el.style.display = 'block';
+    clearTimeout(el._timer);
+    el._timer = setTimeout(() => { el.style.display = 'none'; }, duration);
+}
+
+// Hand tracking toggle (with loading overlay)
+const handsBtn = document.getElementById('hands-toggle-btn');
+if (handsBtn) {
+    handsBtn.addEventListener('click', async () => {
+        if (!handTrackingActive) {
+            handsBtn.textContent = '⏳ Loading...';
+            showLoading('Loading hand tracking model...');
+            await initHandTracking();
+            hideLoading();
+            if (handTrackingActive) {
+                handsBtn.textContent = '✋ Hands Off';
+                handsBtn.classList.add('active');
+                // Auto-enable debug to show hand skeleton
+                isDebug = true;
+                document.getElementById('debug-overlay').style.display = 'block';
+                const db = document.getElementById('debug-toggle-btn');
+                if (db) { db.textContent = '🛠 Debug On'; db.classList.add('active'); }
+            } else {
+                handsBtn.textContent = '✋ Hands On';
+                showError('Camera unavailable — check permissions');
+            }
+        } else {
+            handTrackingActive = false;
+            stopCamera();
+            handsBtn.textContent = '✋ Hands On';
+            handsBtn.classList.remove('active');
+            // Turn off debug
+            isDebug = false;
+            document.getElementById('debug-overlay').style.display = 'none';
+            const db = document.getElementById('debug-toggle-btn');
+            if (db) { db.textContent = '🛠 Debug Off'; db.classList.remove('active'); }
+            clearDebugCanvas();
+            setCommandStatus('Hand tracking stopped');
+        }
+    });
+}
+
+// Debug toggle
+const debugBtn = document.getElementById('debug-toggle-btn');
+if (debugBtn) {
+    debugBtn.addEventListener('click', () => {
+        isDebug = !isDebug;
+        debugBtn.textContent = isDebug ? '🛠 Debug On' : '🛠 Debug Off';
+        debugBtn.classList.toggle('active', isDebug);
+        document.getElementById('debug-overlay').style.display = isDebug ? 'block' : 'none';
+    });
+}
+
+// --- Pattern Wrap wiring ---
+const patternBtn = document.getElementById('pattern-wrap-btn');
+const patternPanel = document.getElementById('pattern-wrap-panel');
+if (patternBtn && patternPanel) {
+    patternBtn.addEventListener('click', () => {
+        patternPanel.style.display = patternPanel.style.display === 'none' ? 'block' : 'none';
+    });
+    document.getElementById('pattern-count')?.addEventListener('input', e => {
+        document.getElementById('pattern-count-val').textContent = e.target.value;
+    });
+    document.getElementById('pattern-scale')?.addEventListener('input', e => {
+        document.getElementById('pattern-scale-val').textContent = (e.target.value / 100).toFixed(2);
+    });
+    document.getElementById('pattern-apply')?.addEventListener('click', () => {
+        const shape = document.getElementById('pattern-shape').value;
+        const mode = document.getElementById('pattern-mode').value;
+        const count = parseInt(document.getElementById('pattern-count').value);
+        const scale = parseInt(document.getElementById('pattern-scale').value) / 100;
+        patternWrap(shape, scale, count, mode);
+        patternPanel.style.display = 'none';
+    });
+    document.getElementById('pattern-close')?.addEventListener('click', () => {
+        patternPanel.style.display = 'none';
+    });
+}
+
+// --- Tuning Panel wiring ---
+const tunePanel = document.getElementById('tune-panel');
+const tuneBtn = document.getElementById('tune-toggle-btn');
+if (tuneBtn && tunePanel) {
+    tuneBtn.addEventListener('click', () => {
+        tunePanel.style.display = tunePanel.style.display === 'none' ? 'block' : 'none';
+    });
+}
+// Visual tuning
+document.getElementById('tune-accent')?.addEventListener('input', e => {
+    document.documentElement.style.setProperty('--accent', e.target.value);
+});
+document.getElementById('tune-bg')?.addEventListener('input', e => {
+    document.documentElement.style.setProperty('--bg-color', e.target.value);
+});
+document.getElementById('tune-grid')?.addEventListener('input', e => {
+    const v = e.target.value / 100;
+    document.getElementById('tune-grid-val').textContent = v.toFixed(2);
+    grid.material.opacity = v;
+});
+document.getElementById('tune-shadow')?.addEventListener('input', e => {
+    const v = e.target.value / 100;
+    document.getElementById('tune-shadow-val').textContent = v.toFixed(2);
+    const toolbar = document.getElementById('splice-toolbar');
+    if (toolbar) toolbar.style.boxShadow = `0 14px 28px rgba(0,0,0,${v})`;
+});
+// Gesture tuning
+document.getElementById('tune-rot')?.addEventListener('input', e => {
+    const v = e.target.value / 10;
+    document.getElementById('tune-rot-val').textContent = v.toFixed(1);
+    ROT_SENSITIVITY = v;
+});
+document.getElementById('tune-damp')?.addEventListener('input', e => {
+    const v = e.target.value / 100;
+    document.getElementById('tune-damp-val').textContent = v.toFixed(2);
+    ROT_DAMPING = v;
+});
+document.getElementById('tune-pinch')?.addEventListener('input', e => {
+    const v = e.target.value / 10;
+    document.getElementById('tune-pinch-val').textContent = v.toFixed(1);
+    TRANSLATE_SENSITIVITY = v;
+});
+// Sculpting tuning
+document.getElementById('tune-brush')?.addEventListener('input', e => {
+    const v = e.target.value / 100;
+    document.getElementById('tune-brush-val').textContent = v.toFixed(2);
+    brushRadius = v;
+});
+document.getElementById('tune-strength')?.addEventListener('input', e => {
+    const v = e.target.value / 100;
+    document.getElementById('tune-strength-val').textContent = v.toFixed(2);
+    sculptStrength = v;
+});
+document.getElementById('tune-displace')?.addEventListener('input', e => {
+    const v = e.target.value / 100;
+    document.getElementById('tune-displace-val').textContent = v.toFixed(2);
+    MAX_VERTEX_DISPLACEMENT = v;
+});
+// Animation tuning
+let abstractBreatheSpeed = 1.0;
+document.getElementById('tune-breathe')?.addEventListener('input', e => {
+    const v = e.target.value / 10;
+    document.getElementById('tune-breathe-val').textContent = v.toFixed(1);
+    abstractBreatheSpeed = v;
+});
+document.getElementById('tune-reduced-motion')?.addEventListener('change', e => {
+    if (e.target.checked) {
+        smoothRotVelX = 0; smoothRotVelY = 0;
+        ROT_DAMPING = 0;
+    } else {
+        ROT_DAMPING = parseFloat(document.getElementById('tune-damp')?.value || 92) / 100;
+    }
+});
+document.getElementById('tune-reset')?.addEventListener('click', () => {
+    ROT_SENSITIVITY = 8.0; ROT_DAMPING = 0.92; TRANSLATE_SENSITIVITY = 5.0;
+    brushRadius = 0.6; sculptStrength = 0.04; MAX_VERTEX_DISPLACEMENT = 0.15;
+    abstractBreatheSpeed = 1.0;
+    document.documentElement.style.setProperty('--accent', '#7b8b6f');
+    document.documentElement.style.setProperty('--bg-color', '#f8eedb');
+    grid.material.opacity = 0.3;
+    // Reset slider positions
+    const resets = {
+        'tune-rot': 80, 'tune-damp': 92, 'tune-pinch': 50,
+        'tune-brush': 60, 'tune-strength': 4, 'tune-displace': 15,
+        'tune-breathe': 10, 'tune-grid': 30, 'tune-shadow': 15,
+    };
+    for (const [id, val] of Object.entries(resets)) {
+        const el = document.getElementById(id);
+        if (el) el.value = val;
+    }
+    document.getElementById('tune-accent').value = '#7b8b6f';
+    document.getElementById('tune-bg').value = '#f8eedb';
+    setCommandStatus('Tuning reset to defaults');
+});
+document.getElementById('tune-close')?.addEventListener('click', () => {
+    tunePanel.style.display = 'none';
+});
+
+// ============================================================
+// 12b. ANIMATE MODE — draw a path, object follows it
+// ============================================================
+let animPath = [];           // array of {x, y} screen points
+let animPath3D = [];         // converted to 3D world positions
+let animIsDrawing = false;
+let animIsPlaying = false;
+let animProgress = 0;        // 0 to 1 along the path
+let animSpeed = 5;
+let animLoop = true;
+let animPathCtx = null;
+let animOriginalPos = null;  // mesh position before animation
+let animPathLine = null;     // THREE.Line showing the 3D path
+
+function initAnimPathCanvas() {
+    const canvas = document.getElementById('anim-path-canvas');
+    if (!canvas) return;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    animPathCtx = canvas.getContext('2d');
+    animPathCtx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawAnimPath() {
+    if (!animPathCtx || animPath.length < 2) return;
+    const canvas = document.getElementById('anim-path-canvas');
+    animPathCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw the path line
+    animPathCtx.strokeStyle = '#ffdd57';
+    animPathCtx.lineWidth = 3;
+    animPathCtx.lineJoin = 'round';
+    animPathCtx.lineCap = 'round';
+    animPathCtx.setLineDash([8, 4]);
+    animPathCtx.beginPath();
+    animPathCtx.moveTo(animPath[0].x, animPath[0].y);
+    for (let i = 1; i < animPath.length; i++) {
+        animPathCtx.lineTo(animPath[i].x, animPath[i].y);
+    }
+    animPathCtx.stroke();
+    animPathCtx.setLineDash([]);
+
+    // Draw dots at intervals
+    animPathCtx.fillStyle = '#ffdd57';
+    for (let i = 0; i < animPath.length; i += Math.max(1, Math.floor(animPath.length / 20))) {
+        animPathCtx.beginPath();
+        animPathCtx.arc(animPath[i].x, animPath[i].y, 4, 0, Math.PI * 2);
+        animPathCtx.fill();
+    }
+
+    // Draw current position indicator
+    if (animIsPlaying && animPath3D.length > 1) {
+        const idx = Math.min(Math.floor(animProgress * (animPath.length - 1)), animPath.length - 1);
+        const pt = animPath[idx];
+        animPathCtx.fillStyle = '#ff6b6b';
+        animPathCtx.beginPath();
+        animPathCtx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+        animPathCtx.fill();
+    }
+}
+
+function convertPathTo3D() {
+    animPath3D = [];
+    for (const pt of animPath) {
+        const ndc = new THREE.Vector2(
+            (pt.x / innerWidth) * 2 - 1,
+            -(pt.y / innerHeight) * 2 + 1
+        );
+        const pos3D = new THREE.Vector3(ndc.x * 3, ndc.y * 3, 0);
+        animPath3D.push(pos3D);
+    }
+    // Simplify: keep every Nth point for smoother motion
+    if (animPath3D.length > 100) {
+        const step = Math.floor(animPath3D.length / 100);
+        animPath3D = animPath3D.filter((_, i) => i % step === 0);
+        animPath = animPath.filter((_, i) => i % step === 0);
+    }
+}
+
+function startAnimPlayback() {
+    if (animPath3D.length < 2) return;
+    animIsPlaying = true;
+    animProgress = 0;
+    animOriginalPos = mesh.position.clone();
+    setCommandStatus('🎬 Playing animation...');
+}
+
+function stopAnimPlayback() {
+    animIsPlaying = false;
+    if (animOriginalPos && mesh) {
+        mesh.position.copy(animOriginalPos);
+    }
+    setCommandStatus('Animation stopped');
+}
+
+function clearAnimPath() {
+    animPath = [];
+    animPath3D = [];
+    animIsPlaying = false;
+    animProgress = 0;
+    if (animOriginalPos && mesh) mesh.position.copy(animOriginalPos);
+    if (animPathCtx) {
+        const canvas = document.getElementById('anim-path-canvas');
+        animPathCtx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    if (animPathLine) { scene.remove(animPathLine); animPathLine = null; }
+    setCommandStatus('Path cleared');
+}
+
+function updateAnimation() {
+    if (!animIsPlaying || animPath3D.length < 2 || !mesh) return;
+
+    animProgress += (animSpeed / 1000);
+
+    if (animProgress >= 1) {
+        if (animLoop) {
+            animProgress = 0;
+        } else {
+            animProgress = 1;
+            animIsPlaying = false;
+            setCommandStatus('Animation finished');
+        }
+    }
+
+    // Interpolate position along path
+    const totalPts = animPath3D.length;
+    const exactIdx = animProgress * (totalPts - 1);
+    const idx = Math.floor(exactIdx);
+    const frac = exactIdx - idx;
+    const nextIdx = Math.min(idx + 1, totalPts - 1);
+
+    const p1 = animPath3D[idx];
+    const p2 = animPath3D[nextIdx];
+    mesh.position.set(
+        p1.x + (p2.x - p1.x) * frac,
+        p1.y + (p2.y - p1.y) * frac,
+        p1.z + (p2.z - p1.z) * frac
+    );
+
+    drawAnimPath();
+}
+
+// Animate path canvas events
+const animCanvas = document.getElementById('anim-path-canvas');
+if (animCanvas) {
+    animCanvas.addEventListener('mousedown', e => {
+        if (currentAppMode !== 'animate') return;
+        animIsDrawing = true;
+        animPath = [{ x: e.clientX, y: e.clientY }];
+        if (animIsPlaying) stopAnimPlayback();
+    });
+    animCanvas.addEventListener('mousemove', e => {
+        if (!animIsDrawing || currentAppMode !== 'animate') return;
+        animPath.push({ x: e.clientX, y: e.clientY });
+        drawAnimPath();
+    });
+    animCanvas.addEventListener('mouseup', () => {
+        if (!animIsDrawing) return;
+        animIsDrawing = false;
+        convertPathTo3D();
+        setCommandStatus(`Path drawn: ${animPath3D.length} points — press Play ▶`);
+    });
+    // Touch support
+    animCanvas.addEventListener('touchstart', e => {
+        if (currentAppMode !== 'animate') return;
+        e.preventDefault();
+        animIsDrawing = true;
+        animPath = [{ x: e.touches[0].clientX, y: e.touches[0].clientY }];
+    }, { passive: false });
+    animCanvas.addEventListener('touchmove', e => {
+        if (!animIsDrawing || currentAppMode !== 'animate') return;
+        e.preventDefault();
+        animPath.push({ x: e.touches[0].clientX, y: e.touches[0].clientY });
+        drawAnimPath();
+    }, { passive: false });
+    animCanvas.addEventListener('touchend', () => {
+        animIsDrawing = false;
+        convertPathTo3D();
+    });
+}
+
+// Animate toolbar buttons
+document.getElementById('anim-play')?.addEventListener('click', () => {
+    convertPathTo3D();
+    startAnimPlayback();
+});
+document.getElementById('anim-pause')?.addEventListener('click', stopAnimPlayback);
+document.getElementById('anim-clear')?.addEventListener('click', clearAnimPath);
+document.getElementById('anim-speed')?.addEventListener('input', e => {
+    animSpeed = parseInt(e.target.value);
+});
+document.getElementById('anim-loop')?.addEventListener('change', e => {
+    animLoop = e.target.checked;
+});
+
+// ============================================================
+// 13. RENDER LOOP
+// ============================================================
+function animate() {
+    requestAnimationFrame(animate);
+
+    // Hand detection
+    detectHands();
+
+    // Spin momentum disabled — was causing objects to fly off screen
+    gmSpinVelX = 0;
+    gmSpinVelY = 0;
+
+    // Apply smooth rotation momentum (runs every frame for fluid motion)
+    if (mesh && (Math.abs(smoothRotVelX) > 0.0001 || Math.abs(smoothRotVelY) > 0.0001)) {
+        mesh.rotation.y += smoothRotVelY;
+        mesh.rotation.x += smoothRotVelX;
+        // Damp velocity — keeps spinning with inertia when hand stops
+        if (currentGesture !== 'rotate') {
+            smoothRotVelX *= ROT_DAMPING;
+            smoothRotVelY *= ROT_DAMPING;
+        }
+    }
+
+    // Abstract breathing animation
+    if (currentAppMode === 'abstract' && abstractAnimating) {
+        abstractAnimate();
+    }
+
+    // Animate mode: move object along drawn path
+    if (currentAppMode === 'animate') {
+        updateAnimation();
+    }
+
+    // Carve-in: continuous push inward while mouse is held still on surface
+    if (carveHoldActive && carvePoint && carveNormal && mesh) {
+        extrudeAt(carvePoint, carveNormal, 0.008);
+        setCommandStatus('Carving in — hold to deepen, release to stop');
+    }
+
+    renderer.render(scene, camera);
+}
+
+animate();
+resetCamera();
+setCommandStatus('Ready');
+
+// Start in gallery view — hide model elements
+document.getElementById('model-actions')?.style.setProperty('display', 'none');
+document.getElementById('canvas-container')?.style.setProperty('display', 'none');
+document.getElementById('splice-toolbar-wrap')?.style.setProperty('display', 'none');
+document.getElementById('instructions-guide')?.style.setProperty('display', 'none');
+const galleryViewInit = document.getElementById('gallery-view');
+if (galleryViewInit) { galleryViewInit.style.display = 'block'; }
+renderGallery();
+
+// ============================================================
+// ============================================================
+// 14. GALLERY — save/load projects
+// ============================================================
+function getGalleryProjects() {
+    try { return JSON.parse(localStorage.getItem('whimsical_gallery') || '[]'); }
+    catch { return []; }
+}
+
+function saveGalleryProjects(projects) {
+    localStorage.setItem('whimsical_gallery', JSON.stringify(projects));
+}
+
+function buildProjectData(name) {
+    renderer.render(scene, camera);
+    const thumbnail = renderer.domElement.toDataURL('image/jpeg', 0.6);
+    const pos = mesh.geometry.attributes.position;
+    const mainMeshData = pos.count > 0 ? Array.from(pos.array) : [];
+    const objectsData = sceneObjects.map(entry => ({
+        name: entry.name,
+        position: entry.mesh.position.toArray(),
+        scale: entry.mesh.scale.toArray(),
+        rotation: [entry.mesh.rotation.x, entry.mesh.rotation.y, entry.mesh.rotation.z],
+        color: entry.mesh.material.color.getHex(),
+    }));
+    return {
+        id: Date.now(),
+        name,
+        date: new Date().toLocaleDateString(),
+        thumbnail,
+        shape: currentShape,
+        positions: mainMeshData,
+        color: material.color.getHex(),
+        scale: mesh.scale.toArray(),
+        position: mesh.position.toArray(),
+        rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+        sceneObjects: objectsData,
+        type: '3d',
+    };
+}
+
+// Save — overwrites current project, or creates new if none loaded
+function saveProject() {
+    if (currentProjectId) {
+        const projects = getGalleryProjects();
+        const idx = projects.findIndex(p => p.id === currentProjectId);
+        // Only overwrite if the loaded project is a 3D model
+        if (idx !== -1 && projects[idx].type !== 'sketch') {
+            const project = buildProjectData(projects[idx].name);
+            project.id = currentProjectId;
+            projects[idx] = project;
+            try {
+                saveGalleryProjects(projects);
+                setCommandStatus(`Saved "${project.name}"!`);
+            } catch (e) {
+                project.thumbnail = '';
+                saveGalleryProjects(projects);
+                setCommandStatus(`Saved "${project.name}" (no thumbnail)`);
+            }
+            return;
+        }
+    }
+    // No current project — fall through to Save As
+    saveAsProject();
+}
+
+// Save As — always creates a new project
+function saveAsProject() {
+    const name = prompt('Project name:', `Project ${getGalleryProjects().length + 1}`);
+    if (!name) return;
+
+    const project = buildProjectData(name);
+    const projects = getGalleryProjects();
+    projects.unshift(project);
+
+    try {
+        saveGalleryProjects(projects);
+        currentProjectId = project.id;
+        setCommandStatus(`Saved "${name}" to gallery!`);
+    } catch (e) {
+        project.thumbnail = '';
+        try {
+            saveGalleryProjects(projects);
+            currentProjectId = project.id;
+            setCommandStatus(`Saved "${name}" (no thumbnail — storage full)`);
+        } catch (e2) {
+            setCommandStatus('Save failed — storage full. Delete old projects.');
+            projects.shift();
+        }
+    }
+}
+
+// Keep old function for gallery button compatibility
+function saveCurrentProject() { saveAsProject(); }
+
+// Sketch save — captures canvas as image
+function saveSketchProject() {
+    if (currentProjectId) {
+        const projects = getGalleryProjects();
+        const idx = projects.findIndex(p => p.id === currentProjectId);
+        // Only overwrite if the loaded project is a sketch
+        if (idx !== -1 && projects[idx].type === 'sketch') {
+            const canvas = document.getElementById('sketch-canvas');
+            const thumbnail = canvas ? canvas.toDataURL('image/jpeg', 0.6) : '';
+            projects[idx].thumbnail = thumbnail;
+            projects[idx].sketchData = thumbnail;
+            projects[idx].date = new Date().toLocaleDateString();
+            try {
+                saveGalleryProjects(projects);
+                setCommandStatus(`Saved "${projects[idx].name}"!`);
+            } catch (e) {
+                projects[idx].thumbnail = '';
+                projects[idx].sketchData = '';
+                saveGalleryProjects(projects);
+                setCommandStatus(`Saved "${projects[idx].name}" (no image)`);
+            }
+            return;
+        }
+    }
+    // No sketch project loaded — Save As
+    saveSketchAsProject();
+}
+
+function saveSketchAsProject() {
+    const name = prompt('Sketch name:', `Sketch ${getGalleryProjects().length + 1}`);
+    if (!name) return;
+    const canvas = document.getElementById('sketch-canvas');
+    const thumbnail = canvas ? canvas.toDataURL('image/jpeg', 0.6) : '';
+    const project = {
+        id: Date.now(),
+        name,
+        date: new Date().toLocaleDateString(),
+        thumbnail,
+        type: 'sketch',
+        sketchData: thumbnail,
+    };
+    const projects = getGalleryProjects();
+    projects.unshift(project);
+    try {
+        saveGalleryProjects(projects);
+        currentProjectId = project.id;
+        setCommandStatus(`Saved sketch "${name}" to gallery!`);
+    } catch (e) {
+        project.thumbnail = '';
+        project.sketchData = '';
+        try {
+            saveGalleryProjects(projects);
+            currentProjectId = project.id;
+            setCommandStatus(`Saved "${name}" (no image — storage full)`);
+        } catch (e2) {
+            setCommandStatus('Save failed — storage full.');
+            projects.shift();
+        }
+    }
+}
+
+document.getElementById('sketch-save-btn')?.addEventListener('click', saveSketchProject);
+document.getElementById('sketch-save-as-btn')?.addEventListener('click', saveSketchAsProject);
+
+function loadProject(project) {
+    // Clear existing scene objects
+    for (const entry of [...sceneObjects]) {
+        removeSceneObject(entry);
+    }
+    deselectObject();
+
+    // Load main mesh
+    if (project.positions && project.positions.length > 0) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(project.positions), 3));
+        g.computeVertexNormals();
+        if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+        mesh = new THREE.Mesh(g, material);
+        refreshWireframe();
+        scene.add(mesh);
+    } else {
+        // Empty project — reset to empty mesh
+        if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+        const emptyGeo = new THREE.BufferGeometry();
+        emptyGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+        mesh = new THREE.Mesh(emptyGeo, material);
+        scene.add(mesh);
+    }
+
+    material.color.setHex(project.color || 0xa8c3e6);
+    material.vertexColors = false;
+    material.needsUpdate = true;
+    if (project.scale) mesh.scale.fromArray(project.scale);
+    if (project.position) mesh.position.fromArray(project.position);
+    if (project.rotation) mesh.rotation.set(project.rotation[0], project.rotation[1], project.rotation[2]);
+    currentShape = project.shape || 'sphere';
+
+    // Restore scene objects
+    if (project.sceneObjects && project.sceneObjects.length > 0) {
+        for (const objData of project.sceneObjects) {
+            // Create object directly as child of mesh with local position
+            const geo = SHAPES[objData.name]().toNonIndexed();
+            geo.computeVertexNormals();
+            const mat = material.clone();
+            if (objData.color) mat.color.setHex(objData.color);
+            const obj = new THREE.Mesh(geo, mat);
+            obj.position.fromArray(objData.position);
+            obj.scale.fromArray(objData.scale);
+            if (objData.rotation) obj.rotation.set(objData.rotation[0], objData.rotation[1], objData.rotation[2]);
+            scene.add(obj);  // add to scene directly
+            const wire = new THREE.LineSegments(
+                new THREE.EdgesGeometry(geo, 15),
+                new THREE.LineBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.12 })
+            );
+            obj.add(wire);
+            sceneObjects.push({ mesh: obj, name: objData.name, wireframe: wire });
+        }
+    }
+
+    currentProjectId = project.id;
+
+    // Open in the correct mode based on project type
+    if (project.type === 'sketch') {
+        applyAppMode('sketch');
+        // Restore sketch canvas from saved data
+        if (project.sketchData) {
+            const canvas = document.getElementById('sketch-canvas');
+            if (canvas) {
+                const ctx = canvas.getContext('2d');
+                const img = new Image();
+                img.onload = () => {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                };
+                img.src = project.sketchData;
+            }
+        }
+        setCommandStatus(`Loaded sketch "${project.name}"`);
+    } else {
+        applyAppMode('model');
+        resetCamera();
+        setCommandStatus(`Loaded "${project.name}"`);
+    }
+}
+
+function deleteProject(id) {
+    const projects = getGalleryProjects().filter(p => p.id !== id);
+    saveGalleryProjects(projects);
+    renderGallery();
+}
+
+function renderGallery() {
+    const grid = document.getElementById('gallery-grid');
+    const empty = document.getElementById('gallery-empty');
+    if (!grid) return;
+
+    const projects = getGalleryProjects();
+
+    if (projects.length === 0) {
+        grid.innerHTML = '';
+        if (empty) empty.style.display = 'block';
+        return;
+    }
+    if (empty) empty.style.display = 'none';
+
+    grid.innerHTML = projects.map(p => `
+        <div class="gallery-card" data-id="${p.id}">
+            <div class="gallery-card-thumb">
+                ${p.thumbnail ? `<img src="${p.thumbnail}" alt="${p.name}">` : '<span class="placeholder">🧊</span>'}
+            </div>
+            <div class="gallery-card-info">
+                <div class="gallery-card-name">${p.name}</div>
+                <div class="gallery-card-date">${p.date}</div>
+                <div class="gallery-card-actions">
+                    <button data-action="load" data-id="${p.id}">📂 Open</button>
+                    <button data-action="delete" data-id="${p.id}">🗑 Delete</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+
+    // Wire up actions
+    grid.querySelectorAll('[data-action="load"]').forEach(btn => {
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            const proj = projects.find(p => p.id === parseInt(btn.dataset.id));
+            if (proj) loadProject(proj);
+        });
+    });
+    grid.querySelectorAll('[data-action="delete"]').forEach(btn => {
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            if (confirm('Delete this project?')) deleteProject(parseInt(btn.dataset.id));
+        });
+    });
+    grid.querySelectorAll('.gallery-card').forEach(card => {
+        card.addEventListener('click', () => {
+            const proj = projects.find(p => p.id === parseInt(card.dataset.id));
+            if (proj) loadProject(proj);
+        });
+    });
+}
+
+document.getElementById('gallery-save-btn')?.addEventListener('click', saveCurrentProject);
+
+// ============================================================
+// 15. BOBA — AI Chat Agent (Gemini-powered)
+// ============================================================
+const catDialogue = document.getElementById('cat-dialogue');
+const chatInput = document.getElementById('chat-input');
+const sendBtn = document.getElementById('send-btn');
+const chatHistory = document.getElementById('chat-history');
+const chatHistoryContainer = document.getElementById('chat-history-container');
+const toggleHistoryBtn = document.getElementById('toggle-history-btn');
+
+// Wink animation
+let winkInterval = setInterval(() => {
+    const openEye = document.getElementById('right-eye-open');
+    const winkEye = document.getElementById('right-eye-wink');
+    if (openEye && winkEye) {
+        openEye.style.display = 'none';
+        winkEye.style.display = 'block';
+        setTimeout(() => { openEye.style.display = ''; winkEye.style.display = 'none'; }, 200);
+    }
+}, 4000 + Math.random() * 3000);
+
+function bobaReply(text) {
+    if (catDialogue) catDialogue.textContent = text;
+}
+
+function addToHistory(who, text) {
+    if (!chatHistory) return;
+    const li = document.createElement('li');
+    li.className = who === 'user' ? 'history-user' : 'history-cat';
+    li.textContent = who === 'user' ? `You: ${text}` : `🐾 ${text}`;
+    chatHistory.appendChild(li);
+    if (chatHistoryContainer) chatHistoryContainer.scrollTop = chatHistoryContainer.scrollHeight;
+}
+
+// --- AI Integration (OpenAI + Gemini) ---
+let aiApiKey = null;
+let aiProvider = null; // 'openai' or 'gemini'
+let aiChatHistory = [];
+
+const GEMINI_MODELS = [
+    'gemini-1.5-flash-8b',
+    'gemini-1.5-flash',
+    'gemini-2.0-flash',
+];
+
+const BOBA_SYSTEM_PROMPT = `You are Boba, a cute cat AI assistant inside a 3D modeling studio called Whimsical Studio. You help users sculpt, model, and design 3D objects using hand gestures and mouse.
+
+You have the personality of a friendly, playful cat. Use occasional cat puns and emojis (🐾 ✨ 🎨) but keep responses concise (1-3 sentences max).
+
+You can execute studio commands by including a JSON action block in your response. Format: [[ACTION:{"cmd":"command_name","args":{}}]]
+
+Available commands:
+- {"cmd":"color","args":{"hex":"#ff4444"}} — Change object color (any hex)
+- {"cmd":"shape","args":{"name":"sphere"}} — Switch shape (sphere, cube, cylinder, cone, torus, pyramid, icosahedron, dodecahedron, torusknot, helix)
+- {"cmd":"texture","args":{"name":"clay"}} — Apply texture (matte, glossy, metallic, wireframe, clay, glass)
+- {"cmd":"export_stl"} — Export model as STL file
+- {"cmd":"undo"} — Undo last action
+- {"cmd":"reset"} — Reset to default shape
+- {"cmd":"wireframe_toggle"} — Toggle wireframe view
+- {"cmd":"mode","args":{"name":"model"}} — Switch app mode (model, abstract, sketch)
+- {"cmd":"add_shape","args":{"name":"sphere"}} — Enter add-shape mode with specified shape
+- {"cmd":"scale","args":{"factor":1.5}} — Scale object by factor
+- {"cmd":"rotate","args":{"x":0,"y":45,"z":0}} — Rotate object (degrees)
+- {"cmd":"merge"} — Merge/bridge gaps between shapes so they connect seamlessly
+- {"cmd":"fix_edges","args":{"passes":3}} — Smooth and fix all edges for clean curves
+- {"cmd":"pattern","args":{"shape":"sphere","count":8,"scale":0.2,"mode":"all"}} — Pattern wrap: duplicate shape around object (mode: ring/vertical/all)
+
+Context about the current workspace:
+- The app has 3 modes: 3D Model, Abstract, and Sketch
+- Hand gestures: open palm=rotate, pinch=move/extrude, cupped=mold, fist=freeze
+- Activation: hold open palm steady ~1s to activate gesture control
+
+If the user asks something unrelated to 3D modeling, still answer helpfully but stay in character as Boba the cat.
+If you want to execute a command, include the action block AND a friendly text response.`;
+
+async function initAI() {
+    let apiKey = sessionStorage.getItem('boba_api_key');
+    if (apiKey && !apiKey.trim()) { sessionStorage.removeItem('boba_api_key'); apiKey = null; }
+    if (!apiKey) {
+        apiKey = prompt('🐾 Boba needs an AI key!\n\nSupported:\n• OpenAI: sk-... (platform.openai.com/api-keys)\n• Gemini: AIza... (aistudio.google.com/apikey)\n\nPaste key (or Cancel for offline):');
+        if (!apiKey || !apiKey.trim()) { bobaReply("Offline mode~ Type 'connect' to add key! 🐾"); return false; }
+        apiKey = apiKey.trim();
+    }
+    const provider = apiKey.startsWith('sk-') ? 'openai' : apiKey.startsWith('AIza') ? 'gemini' : null;
+    if (!provider) { bobaReply("Key not recognized~ Start with 'sk-' (OpenAI) or 'AIza' (Gemini) 🐾"); return false; }
+
+    // Don't waste API calls on validation — just save and test on first real message
+    aiApiKey = apiKey;
+    aiProvider = provider;
+    aiChatHistory = [];
+    sessionStorage.setItem('boba_api_key', apiKey);
+    bobaReply(`Boba is ready on ${provider === 'openai' ? 'OpenAI' : 'Gemini'}! Ask me anything~ ✨🐾`);
+    return true;
+}
+
+async function callAI(userMessage) {
+    const ctx = `[Current: shape=${currentShape}, mode=${currentAppMode}, color=#${material.color.getHexString()}]`;
+    if (aiProvider === 'openai') {
+        aiChatHistory.push({ role: 'user', content: ctx + '\n' + userMessage });
+        const r = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${aiApiKey}` },
+            body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'system', content: BOBA_SYSTEM_PROMPT }, ...aiChatHistory], max_tokens: 300 }),
+        });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); aiChatHistory.pop(); throw new Error(e.error?.message || `HTTP ${r.status}`); }
+        const d = await r.json(); const text = d.choices?.[0]?.message?.content || '';
+        aiChatHistory.push({ role: 'assistant', content: text });
+        if (aiChatHistory.length > 40) aiChatHistory = aiChatHistory.slice(-40);
+        return text;
+    } else {
+        aiChatHistory.push({ role: 'user', parts: [{ text: ctx + '\n' + userMessage }] });
+        for (const m of GEMINI_MODELS) {
+            const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${aiApiKey}`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ system_instruction: { parts: [{ text: BOBA_SYSTEM_PROMPT }] }, contents: aiChatHistory }),
+            });
+            if (r.ok) { const d = await r.json(); const text = d.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                aiChatHistory.push({ role: 'model', parts: [{ text }] });
+                if (aiChatHistory.length > 40) aiChatHistory = aiChatHistory.slice(-40); return text; }
+            // 404 = model not found, 429 = rate limit — skip to next model
+            if (r.status === 404 || r.status === 429) continue;
+            const e = await r.json().catch(() => ({})); const msg = e.error?.message || '';
+            if (msg.includes('quota') || msg.includes('rate') || msg.includes('not found')) continue;
+            aiChatHistory.pop(); throw new Error(msg || `HTTP ${r.status}`);
+        }
+        aiChatHistory.pop(); throw new Error('Gemini rate limit — wait ~30s and try again');
+    }
+}
+
+// Execute a studio command from Gemini's response
+function executeBobaAction(action) {
+    try {
+        const { cmd, args } = action;
+        switch (cmd) {
+            case 'color':
+                material.color.set(args.hex);
+                material.needsUpdate = true;
+                break;
+            case 'shape':
+                if (SHAPES[args.name]) { saveUndo(); setShape(args.name); }
+                break;
+            case 'texture':
+                applyTexture(args.name);
+                break;
+            case 'export_stl':
+                exportSTL();
+                break;
+            case 'undo':
+                undo();
+                break;
+            case 'reset':
+                saveUndo(); setShape(currentShape);
+                break;
+            case 'wireframe_toggle':
+                material.wireframe = !material.wireframe;
+                material.needsUpdate = true;
+                break;
+            case 'mode':
+                applyAppMode(args.name);
+                break;
+            case 'add_shape':
+                if (SHAPES[args.name]) enterAddShapeMode(args.name);
+                break;
+            case 'scale':
+                saveUndo();
+                mesh.scale.multiplyScalar(args.factor || 1);
+                break;
+            case 'rotate':
+                saveUndo();
+                if (args.x) mesh.rotation.x += (args.x * Math.PI) / 180;
+                if (args.y) mesh.rotation.y += (args.y * Math.PI) / 180;
+                if (args.z) mesh.rotation.z += (args.z * Math.PI) / 180;
+                break;
+            case 'merge':
+                mergeShapes();
+                break;
+            case 'smooth':
+            case 'fix_edges':
+                smoothAllEdges(args?.passes || 3);
+                break;
+            case 'pattern':
+                patternWrap(args.shape || 'sphere', args.scale || 0.2, args.count || 8, args.mode || 'all');
+                break;
+            default:
+                console.warn('Unknown Boba action:', cmd);
+        }
+    } catch (e) {
+        console.error('Boba action failed:', e);
+    }
+}
+
+// Parse action blocks from Gemini response
+function parseBobaResponse(text) {
+    const actionRegex = /\[\[ACTION:(.*?)\]\]/g;
+    const actions = [];
+    let match;
+    while ((match = actionRegex.exec(text)) !== null) {
+        try { actions.push(JSON.parse(match[1])); } catch (e) { /* skip bad JSON */ }
+    }
+    const cleanText = text.replace(/\[\[ACTION:.*?\]\]/g, '').trim();
+    return { text: cleanText, actions };
+}
+
+// Fallback offline command parser (same as old Boba)
+function processOfflineCommand(input) {
+    const msg = input.toLowerCase().trim();
+
+    // Color — names and hex codes
+    const colorMatch = msg.match(/\b(red|blue|green|yellow|orange|purple|pink|white|black|gold|silver|cyan|teal|lime|coral|navy|maroon|olive|salmon|turquoise|violet|indigo|crimson|magenta)\b/);
+    const COLORS = { red:'#ff4444', blue:'#4488ff', green:'#44cc66', yellow:'#ffdd44', orange:'#ff8833', purple:'#9944ff', pink:'#ff66aa', white:'#ffffff', black:'#222222', gold:'#ffd700', silver:'#c0c0c0', cyan:'#00cccc', teal:'#008888', lime:'#32cd32', coral:'#ff7f50', navy:'#000080', maroon:'#800000', olive:'#808000', salmon:'#fa8072', turquoise:'#40e0d0', violet:'#ee82ee', indigo:'#4b0082', crimson:'#dc143c', magenta:'#ff00ff' };
+    if (colorMatch && COLORS[colorMatch[1]]) {
+        material.color.set(COLORS[colorMatch[1]]); material.needsUpdate = true;
+        return `Changed color to ${colorMatch[1]}! 🎨`;
+    }
+    const hexMatch = msg.match(/#([0-9a-f]{6}|[0-9a-f]{3})\b/i);
+    if (hexMatch) { material.color.set('#' + hexMatch[1]); material.needsUpdate = true; return `Set color to #${hexMatch[1]}! 🎨`; }
+
+    // Shape — switch or add
+    const shapeMatch = msg.match(/\b(sphere|cube|cylinder|cone|torus|pyramid|icosahedron|dodecahedron|helix|torusknot)\b/);
+    if (shapeMatch && SHAPES[shapeMatch[1]]) {
+        if (msg.includes('add') || msg.includes('attach') || msg.includes('place')) {
+            enterAddShapeMode(shapeMatch[1]);
+            return `Add shape mode: ${SHAPE_LABELS[shapeMatch[1]]}! Click to place 🐾`;
+        }
+        saveUndo(); setShape(shapeMatch[1]);
+        return `Switched to ${SHAPE_LABELS[shapeMatch[1]]}! ✨`;
+    }
+
+    // Texture
+    const texMatch = msg.match(/\b(matte|glossy|metallic|wireframe|clay|glass)\b/);
+    if (texMatch) { applyTexture(texMatch[1]); return `Applied ${texMatch[1]} texture! 🐾`; }
+
+    // Scale
+    const scaleNum = msg.match(/scale\s*(?:to|by)?\s*(\d+\.?\d*)/);
+    if (scaleNum) { saveUndo(); mesh.scale.multiplyScalar(parseFloat(scaleNum[1])); return `Scaled by ${scaleNum[1]}x! 🐾`; }
+    if (msg.match(/\b(bigger|larger|scale up|grow|enlarge)\b/)) { saveUndo(); mesh.scale.multiplyScalar(1.3); return 'Made it bigger! 🐾'; }
+    if (msg.match(/\b(smaller|shrink|scale down|tiny|reduce)\b/)) { saveUndo(); mesh.scale.multiplyScalar(0.7); return 'Made it smaller! 🐾'; }
+
+    // Rotate
+    const rotNum = msg.match(/rotate\s*(?:by)?\s*(\d+)/);
+    if (rotNum) { saveUndo(); mesh.rotation.y += (parseInt(rotNum[1]) * Math.PI) / 180; return `Rotated ${rotNum[1]}°! 🐾`; }
+    if (msg.match(/\b(rotate|spin|turn)\b/)) { saveUndo(); mesh.rotation.y += Math.PI / 4; return 'Rotated 45°! 🐾'; }
+
+    // Modes
+    if (msg.match(/\b(abstract|blob)\b/)) { applyAppMode('abstract'); return 'Abstract mode! 🫧'; }
+    if (msg.match(/\b(sketch|draw)\b/)) { applyAppMode('sketch'); return 'Sketch mode! ✏️'; }
+    if (msg.match(/\bmodel\b/) && !msg.includes('remodel')) { applyAppMode('model'); return '3D Model mode! 🧊'; }
+
+    // Actions
+    if (msg.match(/\b(export|stl|save)\b/)) { exportSTL(); return 'Exported STL! 💾'; }
+    if (msg.includes('undo')) { undo(); return 'Undone! ↩'; }
+    if (msg.match(/\b(reset|start over|clear)\b/)) { saveUndo(); setShape(currentShape); return 'Reset! ✧'; }
+    if (msg.match(/\b(wireframe|wire)\b/)) { material.wireframe = !material.wireframe; material.needsUpdate = true; return `Wireframe ${material.wireframe ? 'on' : 'off'}! 🐾`; }
+    if (msg.match(/\b(mirror|flip)\b/)) { mirrorMesh('x'); return 'Mirrored! 🪞'; }
+
+    // Fix edges / smooth all
+    if (msg.match(/\b(fix edge|smooth edge|clean ?up|fix it|smooth all|smooth out|soften|round edge|curve edge|polish)\b/i)) {
+        smoothAllEdges(3);
+        return 'Edges smoothed and cleaned up! Purrfect curves~ ✨🐾';
+    }
+
+    // Merge shapes
+    if (msg.match(/\b(merge|connect|bridge|join|stitch|fill gap|no gap)\b/)) {
+        mergeShapes();
+        return 'Merged shapes together! No more gaps~ 🔗';
+    }
+
+    // Pattern wrap
+    const patternMatch = msg.match(/pattern\s+(ring|vertical|all)\s+(\d+)\s*(sphere|cube|star|heart|berry|cone|torus)?/);
+    if (patternMatch || msg.includes('pattern') || msg.includes('wrap')) {
+        const mode = patternMatch?.[1] || 'all';
+        const count = parseInt(patternMatch?.[2]) || 8;
+        const shape = patternMatch?.[3] || 'sphere';
+        patternWrap(shape, 0.2, count, mode);
+        return `Pattern wrap: ${count}× ${shape} (${mode})! ⊛`;
+    }
+
+    // Help
+    if (msg.match(/\b(help|commands?|what can)\b/)) {
+        return '🐾 Try: colors (red, #ff0000), shapes (cube, sphere), textures (glossy, glass), bigger/smaller, rotate, mirror, wireframe, export, add sphere, abstract mode, sketch mode, undo, reset. "connect" for AI mode!';
+    }
+
+    // Greetings
+    if (msg.match(/\b(hi|hello|hey|meow|sup)\b/)) { return 'Meow~ Tell me what to sculpt! 🐾'; }
+    if (msg.match(/\b(thanks|thank you|thx)\b/)) { return "Paw-some! Happy to help~ 🐾"; }
+
+    return null;
+}
+
+async function processBobaCommand(input) {
+    addToHistory('user', input);
+    const msg = input.toLowerCase().trim();
+
+    // Special commands: connect/reconnect AI
+    if (msg === 'connect' || msg === 'api key' || msg === 'reconnect') {
+        sessionStorage.removeItem('boba_api_key');
+        aiApiKey = null;
+        aiProvider = null;
+        aiChatHistory = [];
+        bobaReply('Reconnecting... 🐾');
+        await initAI();
+        return;
+    }
+
+    if (aiApiKey) {
+        // Try offline command first — instant, no API call needed for simple stuff
+        const offlineResult = processOfflineCommand(input);
+        if (offlineResult) {
+            bobaReply(offlineResult);
+            addToHistory('cat', offlineResult);
+            return;
+        }
+        // Complex request — use AI
+        bobaReply('Thinking... 🐾');
+        try {
+            const responseText = await callAI(input);
+            const { text, actions } = parseBobaResponse(responseText);
+            for (const action of actions) executeBobaAction(action);
+            const reply = text || 'Done! 🐾';
+            bobaReply(reply);
+            addToHistory('cat', reply);
+        } catch (e) {
+            console.error('AI error:', e);
+            const reply = e.message.includes('rate') || e.message.includes('quota')
+                ? 'Rate limited~ Wait 30s and try again, or use offline commands (type "help")! 🐾'
+                : 'Meow, glitch~ ' + e.message + ' 🐾';
+            bobaReply(reply);
+            addToHistory('cat', reply);
+        }
+    } else {
+        const reply = processOfflineCommand(input) || "Offline mode~ Type 'help' for commands or 'connect' for AI! 🐱";
+        bobaReply(reply);
+        addToHistory('cat', reply);
+    }
+}
+
+// Don't auto-prompt for AI key — only connect when user first sends a message
+// or types 'connect'
+
+if (sendBtn && chatInput) {
+    sendBtn.addEventListener('click', () => {
+        if (chatInput.value.trim()) {
+            processBobaCommand(chatInput.value);
+            chatInput.value = '';
+        }
+    });
+    chatInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && chatInput.value.trim()) {
+            processBobaCommand(chatInput.value);
+            chatInput.value = '';
+        }
+    });
+}
+
+if (toggleHistoryBtn && chatHistoryContainer) {
+    toggleHistoryBtn.addEventListener('click', () => {
+        chatHistoryContainer.style.display = chatHistoryContainer.style.display === 'none' ? 'block' : 'none';
+    });
+}
