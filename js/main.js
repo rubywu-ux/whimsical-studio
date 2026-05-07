@@ -3307,17 +3307,38 @@ renderer.domElement.addEventListener('mousemove', e => {
                 setCommandStatus(`Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
             } else if (sceneObjects.length > 0) {
                 // Orbit around the center of all objects
+                // Calculate pivot in local mesh space
                 const pivot = new THREE.Vector3();
                 for (const entry of sceneObjects) {
                     pivot.add(entry.mesh.position);
                 }
                 pivot.divideScalar(sceneObjects.length);
 
-                // Move mesh so pivot is at origin, rotate, move back
-                mesh.position.sub(pivot);
-                mesh.rotation.y += dx * 0.01;
-                mesh.rotation.x += dy * 0.01;
-                mesh.position.add(pivot);
+                // Rotate each object's position around the pivot
+                const angleY = dx * 0.01;
+                const angleX = dy * 0.01;
+                for (const entry of sceneObjects) {
+                    const pos = entry.mesh.position.clone().sub(pivot);
+                    // Rotate around Y axis
+                    const cosY = Math.cos(angleY), sinY = Math.sin(angleY);
+                    const newX = pos.x * cosY + pos.z * sinY;
+                    const newZ = -pos.x * sinY + pos.z * cosY;
+                    pos.x = newX;
+                    pos.z = newZ;
+                    // Rotate around X axis
+                    const cosX = Math.cos(angleX), sinX = Math.sin(angleX);
+                    const newY = pos.y * cosX - pos.z * sinX;
+                    const newZ2 = pos.y * sinX + pos.z * cosX;
+                    pos.y = newY;
+                    pos.z = newZ2;
+                    entry.mesh.position.copy(pos.add(pivot));
+                }
+                // Also rotate each object itself so it faces correctly
+                for (const entry of sceneObjects) {
+                    entry.mesh.rotation.y += angleY;
+                    entry.mesh.rotation.x += angleX;
+                }
+                updateSelectedOutline();
             } else {
                 mesh.rotation.y += dx * 0.01;
                 mesh.rotation.x += dy * 0.01;
