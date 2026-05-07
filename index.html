@@ -20,6 +20,7 @@
     <div id="workshop-bar-inner">
       <button class="ws-btn active" data-appmode="gallery">🖼️ Gallery</button>
       <button class="ws-btn" data-appmode="model">🧰 3D Model</button>
+      <button class="ws-btn" data-appmode="freeform">✋ Freeform</button>
       <button class="ws-btn" data-appmode="sketch">✏️ Sketch</button>
     </div>
     <div id="workshop-bar-actions">
@@ -35,7 +36,7 @@
           <option value="glass">Glass</option>
         </select>
         <!-- Color wheel -->
-        <input type="color" id="model-color-wheel" value="#a8c3e6" title="Object color">
+        <input type="color" id="model-color-wheel" value="#d4b896" title="Object color">
         <!-- Gradient picker -->
         <button id="gradient-btn" title="Gradient picker">🌈 Gradient</button>
       </span>
@@ -51,11 +52,26 @@
         <button class="draw-tool-btn" data-drawtool="acrylic" title="Acrylic">🖌️ Acrylic</button>
         <button class="draw-tool-btn" data-drawtool="eraser" title="Eraser">🧹 Eraser</button>
         <input type="color" id="sketch-color-wheel" value="#333333" title="Pen color">
+        <button id="sketch-new-btn" title="New sketch (Ctrl+N)">📝 New</button>
         <button id="sketch-save-btn" title="Save sketch (Ctrl+S)">💾 Save</button>
         <button id="sketch-save-as-btn" title="Save sketch as new">📄 Save As</button>
         <button id="sketch-export-btn" title="Export sketch as SVG">📦 Export SVG</button>
+        <button id="sketch-apply-btn" title="Apply sketch as texture to 3D model">🎨 Apply to 3D</button>
       </span>
 
+      <!-- Freeform mode tools (hidden by default) -->
+      <span id="freeform-actions" style="display:none;">
+        <button class="ff-shape-btn" data-ffshape="cube" title="Add Cube">⬡ Cube</button>
+        <button class="ff-shape-btn" data-ffshape="sphere" title="Add Sphere">◉ Sphere</button>
+        <button class="ff-shape-btn" data-ffshape="cylinder" title="Add Cylinder">⬢ Cylinder</button>
+        <button class="ff-shape-btn" data-ffshape="cone" title="Add Cone">△ Cone</button>
+        <button class="ff-shape-btn" data-ffshape="torus" title="Add Torus">◎ Torus</button>
+        <button class="ff-shape-btn" data-ffshape="star" title="Add Star">⭐ Star</button>
+        <button class="ff-shape-btn" id="ff-select-all-btn" title="Select all as group">☐ All</button>
+        <input type="color" id="ff-color-wheel" value="#d4b896" title="Object color">
+      </span>
+
+      <button id="hands-toggle-btn" title="Toggle hand tracking">✋ Hands On</button>
       <button id="debug-toggle-btn" title="Toggle Debug Mode">🛠 Debug Off</button>
     </div>
   </div>
@@ -129,6 +145,8 @@
       <button class="splice-icon-btn" data-quick-command="reset" title="Reset object">✧</button>
       <button class="splice-icon-btn" id="undo-btn" title="Undo (Ctrl+Z)">↩</button>
       <button class="splice-icon-btn" id="merge-all-btn" title="Merge all objects into one mesh">🔗 Merge</button>
+      <button class="splice-icon-btn" id="select-all-btn" title="Select all objects as group (Ctrl+A)">☐ Select All</button>
+      <button class="splice-icon-btn" id="new-project-btn" title="New project (Ctrl+N)">📝 New</button>
       <button class="splice-icon-btn" id="save-btn" title="Save project (Ctrl+S)">💾 Save</button>
       <button class="splice-icon-btn" id="save-as-btn" title="Save as new project">📄 Save As</button>
       <button class="splice-icon-btn" id="export-stl-btn" title="Export STL">📦 STL</button>
@@ -223,6 +241,36 @@
   <div id="bg-floor"></div>
   <div id="bg-decor"></div>
 
+  <!-- ============ GESTURE MODE BAR (left side) ============ -->
+  <div id="gesture-mode-bar" style="display:none;">
+    <div class="gm-title">✋ Gesture Modes</div>
+    <div class="gm-slot active" data-slot="0" data-mode="leftclick">
+      <div class="gm-slot-num">1</div>
+      <div class="gm-slot-icon">🖱️</div>
+      <div class="gm-slot-label">Left Click</div>
+      <svg class="gm-countdown" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16"/></svg>
+    </div>
+    <div class="gm-slot" data-slot="1" data-mode="rightclick">
+      <div class="gm-slot-num">2</div>
+      <div class="gm-slot-icon">🖱️</div>
+      <div class="gm-slot-label">Right Click</div>
+      <svg class="gm-countdown" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16"/></svg>
+    </div>
+    <div class="gm-slot" data-slot="2" data-mode="zoom">
+      <div class="gm-slot-num">3</div>
+      <div class="gm-slot-icon">🔍</div>
+      <div class="gm-slot-label">Zoom</div>
+      <svg class="gm-countdown" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16"/></svg>
+    </div>
+    <div class="gm-slot" data-slot="3" data-mode="free">
+      <div class="gm-slot-num">4</div>
+      <div class="gm-slot-icon">🖐️</div>
+      <div class="gm-slot-label">Free Move</div>
+      <svg class="gm-countdown" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16"/></svg>
+    </div>
+    <button id="gm-reset-btn">Reset Default</button>
+  </div>
+
   <!-- ============ ORBIT/PAN REFERENCE POINT ============ -->
   <div id="orbit-ref" style="display:none;">
     <div class="orbit-ref-h"></div>
@@ -245,7 +293,7 @@
   <canvas id="sketch-canvas" style="display:none;"></canvas>
 
   <!-- ============ DEBUG OVERLAY ============ -->
-  <div id="debug-overlay" style="display:none; position:absolute; top:0; left:0; width:100vw; height:100vh; pointer-events:none; z-index:100;">
+  <div id="debug-overlay" style="display:none; position:absolute; top:0; left:0; width:100vw; height:100vh; pointer-events:none; z-index:300;">
     <canvas id="debug-canvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas>
     <div id="debug-gesture-text" style="position:absolute; top:80px; right:20px; font-family:monospace; font-size:20px; color:#ff3333; font-weight:bold; background:rgba(255,255,255,0.8); padding:8px 12px; border-radius:8px; border:2px solid #ff3333;">Gesture: None</div>
     <div id="debug-command-text" style="position:absolute; top:130px; right:20px; font-family:monospace; font-size:16px; color:#2b332b; font-weight:bold; background:rgba(255,255,255,0.85); padding:8px 12px; border-radius:8px; border:2px solid #7b8b6f;">Command: Idle</div>
@@ -258,24 +306,28 @@
     <h2>🧊 3D Model Guide</h2>
     <h3 style="font-size:12px;margin:4px 0;">🖱 Mouse Controls</h3>
     <ul>
-      <li><strong>Hover:</strong> Yellow highlight shows affected faces</li>
-      <li><strong>Drag on face:</strong> Extrude (up=out, down=in)</li>
-      <li><strong>Drag empty:</strong> Orbit camera</li>
+      <li><strong>Left drag:</strong> Orbit camera</li>
       <li><strong>Right drag:</strong> Pan camera</li>
-      <li><strong>Scroll:</strong> Zoom</li>
-      <li><strong>Shift+drag:</strong> Smooth surface</li>
-      <li><strong>Ctrl+drag:</strong> Soft sculpt</li>
-      <li><strong>Alt+click:</strong> Mirror</li>
+      <li><strong>Scroll:</strong> Zoom in/out</li>
+      <li><strong>Click object:</strong> Select (shows axes + box)</li>
+      <li><strong>Drag selected:</strong> Move object</li>
+      <li><strong>Shift+drag selected:</strong> Stretch along axis</li>
+      <li><strong>Scroll on selected:</strong> Resize</li>
+      <li><strong>Ctrl+C/X/V:</strong> Copy / Cut / Paste</li>
+      <li><strong>Delete:</strong> Remove selected</li>
+      <li><strong>Esc:</strong> Deselect</li>
+      <li><strong>Ctrl+S:</strong> Save / <strong>Ctrl+Shift+S:</strong> Save As</li>
+      <li><strong>Ctrl+N:</strong> New project</li>
       <li><strong>Ctrl+Z:</strong> Undo</li>
     </ul>
-    <h3 style="font-size:12px;margin:8px 0 4px;">➕ Add Shape Mode</h3>
+    <h3 style="font-size:12px;margin:8px 0 4px;">➕ Add Shape</h3>
     <ul>
-      <li><strong>Toolbar ＋ Add</strong> to enter</li>
-      <li>� <strong>Mouse:</strong> Hover to position, scroll to resize, click to place</li>
-      <li>⌨️ <strong>Q/E R/F ←→:</strong> Rotate preview</li>
-      <li><strong>Esc:</strong> Cancel</li>
+      <li>Click <strong>＋ Add</strong> → pick shape</li>
+      <li>Hover to position, scroll to resize</li>
+      <li>Click to place, Esc to cancel</li>
+      <li>Q/E R/F arrows to rotate preview</li>
     </ul>
-    <p class="tip">Shape-preserving: extrude, mirror, split. Export STL for 3D printing!</p>
+    <p class="tip">Select → move, resize, copy, paste. Merge all before STL export!</p>
   </div>
 
   <!-- Sketch Guide -->
@@ -288,13 +340,43 @@
     </ul>
   </div>
 
+  <!-- Freeform Guide -->
+  <div id="freeform-guide" style="display:none;">
+    <h2>✋ Freeform Guide</h2>
+    <h3 style="font-size:12px;margin:4px 0;">🤲 Hand Gestures</h3>
+    <ul>
+      <li><strong>👌 Pinch:</strong> Grab / select shape</li>
+      <li><strong>👌 Pinch + drag:</strong> Move shape</li>
+      <li><strong>👌 Push / pull:</strong> Scale shape</li>
+      <li><strong>Release pinch:</strong> Drop in place</li>
+      <li><strong>🖐 Open palm:</strong> Rotate shape</li>
+      <li><strong>🖐🖐 Two palms:</strong> Zoom camera</li>
+      <li><strong>👌👌 Two pinch spread:</strong> Scale shape</li>
+      <li><strong>✊✊ Two fists apart:</strong> Stretch / grow</li>
+      <li><strong>✊✊ Two fists together:</strong> Squish / shrink</li>
+      <li><strong>🖐🖐 3 fingers + push:</strong> Sculpt surface in</li>
+      <li><strong>🖐🖐 3 fingers + pull:</strong> Sculpt surface out</li>
+      <li><strong>☝️ Point:</strong> Highlight faces</li>
+      <li><strong>✊ Fist:</strong> Freeze</li>
+      <li><strong>👌 Pinch empty:</strong> Deselect</li>
+    </ul>
+    <h3 style="font-size:12px;margin:8px 0 4px;">🖱 Mouse Controls</h3>
+    <ul>
+      <li><strong>Left drag:</strong> Orbit camera</li>
+      <li><strong>Click object:</strong> Select</li>
+      <li><strong>Scroll:</strong> Zoom</li>
+      <li><strong>Delete:</strong> Remove selected</li>
+    </ul>
+    <p class="tip">Add shapes from toolbar, then sculpt & arrange with your hands like building blocks!</p>
+  </div>
+
   <!-- ============ GALLERY VIEW ============ -->
   <div id="gallery-view" style="display:none;">
     <div id="gallery-header">
       <h2>🖼️ My Projects</h2>
     </div>
     <div id="gallery-empty" style="display:none;">
-      <p>No saved projects yet. Go to 3D Model or Sketch, create something, then come back here to save it!</p>
+      <p>No saved projects yet. Create a new 3D Model or Sketch project, then use 💾 Save to add it here!</p>
     </div>
     <div id="gallery-grid"></div>
   </div>
@@ -323,7 +405,7 @@
       <div id="ai-name-badge" style="font-weight:bold; color:#5a6652; background:rgba(255,255,255,0.85); border:1px solid #7b8b6f; border-radius:12px; padding:2px 8px; margin-top:-10px; font-size:13px; position:relative; z-index:10; display:inline-block;">🐾 Boba</div>
     </div>
     <div id="chat-interface">
-      <div id="cat-dialogue">Meow~ I'm Boba, your AI sculpting assistant! Powered by Gemini ✨</div>
+      <div id="cat-dialogue">Meow~ I'm Boba! Type 'connect' to link AI, or just ask me anything 🐾</div>
       <div id="chat-history-container" style="display: none;">
         <ul id="chat-history"></ul>
       </div>

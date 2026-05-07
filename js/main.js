@@ -6,13 +6,17 @@ import { HandLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-
 // ============================================================
 const container = document.getElementById('canvas-container');
 const scene = new THREE.Scene();
-scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+scene.add(new THREE.AmbientLight(0xfaf0e6, 0.6)); // warm ambient
+const dirLight = new THREE.DirectionalLight(0xfffaf0, 1.2);
 dirLight.position.set(5, 10, 7);
 scene.add(dirLight);
-const backLight = new THREE.DirectionalLight(0xffffff, 0.3);
+const backLight = new THREE.DirectionalLight(0xe8ddd0, 0.4);
 backLight.position.set(-5, -3, -5);
 scene.add(backLight);
+// Soft fill from below for clay look
+const fillLight = new THREE.DirectionalLight(0xd4c4b0, 0.25);
+fillLight.position.set(0, -5, 3);
+scene.add(fillLight);
 
 const grid = new THREE.GridHelper(20, 20, 0x7b8b6f, 0x7b8b6f);
 grid.position.y = -1.5;
@@ -22,6 +26,8 @@ scene.add(grid);
 
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
 camera.position.set(0, 0, 6);
+camera.lookAt(0, 0, 0);
+let orbitTarget = new THREE.Vector3(0, 0, 0); // camera looks at this point
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
@@ -424,7 +430,7 @@ let currentShape = 'sphere';
 let mesh = null;
 let wireframe = null;
 const material = new THREE.MeshStandardMaterial({
-    color: 0xa8c3e6, roughness: 0.35, metalness: 0.1,
+    color: 0xd4b896, roughness: 0.85, metalness: 0.0,
     flatShading: false, side: THREE.DoubleSide,
 });
 
@@ -442,17 +448,54 @@ const outlineMat = new THREE.MeshBasicMaterial({
     side: THREE.BackSide, depthWrite: false,
 });
 
+// Hover highlight (shown before selection)
+let hoveredObject = null;
+let hoverOutline = null;
+const hoverOutlineMat = new THREE.MeshBasicMaterial({
+    color: 0x88ccff, transparent: true, opacity: 0.2,
+    side: THREE.BackSide, depthWrite: false,
+});
+
+function setHoveredObject(entry) {
+    if (hoveredObject === entry) {
+        // Just update transform
+        if (hoverOutline && entry) {
+            entry.mesh.updateMatrixWorld(true);
+            hoverOutline.matrix.copy(entry.mesh.matrixWorld).scale(new THREE.Vector3(1.06, 1.06, 1.06));
+        }
+        return;
+    }
+    clearHoveredObject();
+    if (!entry || entry === selectedObject) return;
+    hoveredObject = entry;
+    const geo = entry.mesh.geometry.clone();
+    hoverOutline = new THREE.Mesh(geo, hoverOutlineMat);
+    entry.mesh.updateMatrixWorld(true);
+    hoverOutline.matrixAutoUpdate = false;
+    hoverOutline.matrix.copy(entry.mesh.matrixWorld).scale(new THREE.Vector3(1.06, 1.06, 1.06));
+    hoverOutline.renderOrder = 900;
+    scene.add(hoverOutline);
+}
+
+function clearHoveredObject() {
+    if (hoverOutline) {
+        scene.remove(hoverOutline);
+        hoverOutline.geometry.dispose();
+        hoverOutline = null;
+    }
+    hoveredObject = null;
+}
+
 function addSceneObject(shapeName, worldPos, scale, rotation) {
     const geo = SHAPES[shapeName]().toNonIndexed();
     geo.computeVertexNormals();
     const mat = material.clone();
     const obj = new THREE.Mesh(geo, mat);
-    // Convert world position to main mesh's local space so object rotates with mesh
-    const localPos = worldPos.clone().applyMatrix4(new THREE.Matrix4().copy(mesh.matrixWorld).invert());
-    obj.position.copy(localPos);
+    // Place directly in world space
+    obj.position.copy(worldPos);
     if (scale) obj.scale.setScalar(scale);
     if (rotation) obj.rotation.copy(rotation);
-    mesh.add(obj); // child of main mesh — moves/rotates together
+    scene.add(obj); // add directly to scene — always visible
     const wire = new THREE.LineSegments(
         new THREE.EdgesGeometry(geo, 15),
         new THREE.LineBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.12 })
@@ -465,7 +508,7 @@ function addSceneObject(shapeName, worldPos, scale, rotation) {
 
 function removeSceneObject(entry) {
     if (!entry) return;
-    mesh.remove(entry.mesh); // remove from main mesh parent
+    scene.remove(entry.mesh); // remove from scene
     entry.mesh.geometry.dispose();
     entry.mesh.material.dispose();
     if (entry.wireframe) entry.wireframe.geometry.dispose();
@@ -476,6 +519,79 @@ function removeSceneObject(entry) {
 
 let selectedBoxHelper = null; // bounding box wireframe
 let selectedAxesHelper = null; // RGB axis arrows
+let selectedAnchors = []; // scale anchor handles
+let draggingAnchor = null; // which anchor is being dragged
+let anchorDragAxis = null; // 'x', 'y', or 'z'
+let anchorDragSign = 0; // +1 or -1
+
+const ANCHOR_SIZE = 0.1;
+const ANCHOR_COLORS = {
+    x: 0xff4444, // red
+    y: 0x44ff44, // green
+    z: 0x4444ff, // blue
+};
+
+function createAnchorHandles(entry) {
+    removeAnchorHandles();
+    entry.mesh.geometry.computeBoundingBox();
+    const box = entry.mesh.geometry.boundingBox;
+    if (!box) return;
+    const s = entry.mesh.scale;
+
+    const axes = [
+        { axis: 'x', sign: +1, pos: new THREE.Vector3(box.max.x * s.x, 0, 0) },
+        { axis: 'x', sign: -1, pos: new THREE.Vector3(box.min.x * s.x, 0, 0) },
+        { axis: 'y', sign: +1, pos: new THREE.Vector3(0, box.max.y * s.y, 0) },
+        { axis: 'y', sign: -1, pos: new THREE.Vector3(0, box.min.y * s.y, 0) },
+        { axis: 'z', sign: +1, pos: new THREE.Vector3(0, 0, box.max.z * s.z) },
+        { axis: 'z', sign: -1, pos: new THREE.Vector3(0, 0, box.min.z * s.z) },
+    ];
+
+    const geo = new THREE.SphereGeometry(ANCHOR_SIZE, 8, 8);
+    for (const a of axes) {
+        const mat = new THREE.MeshBasicMaterial({
+            color: ANCHOR_COLORS[a.axis],
+            depthTest: false,
+            transparent: true,
+            opacity: 0.85,
+        });
+        const sphere = new THREE.Mesh(geo, mat);
+        sphere.position.copy(a.pos);
+        sphere.renderOrder = 1000;
+        sphere.userData = { axis: a.axis, sign: a.sign };
+        entry.mesh.add(sphere);
+        selectedAnchors.push(sphere);
+    }
+}
+
+function removeAnchorHandles() {
+    for (const anchor of selectedAnchors) {
+        if (anchor.parent) anchor.parent.remove(anchor);
+        anchor.material.dispose();
+    }
+    selectedAnchors = [];
+    draggingAnchor = null;
+    anchorDragAxis = null;
+}
+
+function updateAnchorPositions(entry) {
+    if (!selectedAnchors.length || !entry) return;
+    entry.mesh.geometry.computeBoundingBox();
+    const box = entry.mesh.geometry.boundingBox;
+    if (!box) return;
+    const s = entry.mesh.scale;
+    const positions = [
+        new THREE.Vector3(box.max.x * s.x, 0, 0),
+        new THREE.Vector3(box.min.x * s.x, 0, 0),
+        new THREE.Vector3(0, box.max.y * s.y, 0),
+        new THREE.Vector3(0, box.min.y * s.y, 0),
+        new THREE.Vector3(0, 0, box.max.z * s.z),
+        new THREE.Vector3(0, 0, box.min.z * s.z),
+    ];
+    for (let i = 0; i < selectedAnchors.length && i < positions.length; i++) {
+        selectedAnchors[i].position.copy(positions[i]);
+    }
+}
 
 function selectObject(entry) {
     deselectObject();
@@ -501,10 +617,17 @@ function selectObject(entry) {
     selectedAxesHelper.renderOrder = 999;
     entry.mesh.add(selectedAxesHelper);
 
+    // Scale anchor handles
+    createAnchorHandles(entry);
+
     setCommandStatus(`Selected: ${SHAPE_LABELS[entry.name] || entry.name} — drag to move, scroll to resize, Delete to remove`);
 }
 
 function deselectObject() {
+    // If we have a group selection, ungroup first
+    if (selectedObject && selectedObject._isGroup) {
+        ungroupAllObjects();
+    }
     if (selectedOutline) {
         scene.remove(selectedOutline);
         selectedOutline.geometry.dispose();
@@ -520,7 +643,113 @@ function deselectObject() {
         selectedAxesHelper.dispose();
         selectedAxesHelper = null;
     }
+    removeAnchorHandles();
     selectedObject = null;
+}
+
+// Group all scene objects under a temporary parent for manipulation as one
+let groupParent = null;
+let groupedOriginalPositions = []; // original world positions before grouping
+
+function selectAllObjects() {
+    if (sceneObjects.length === 0) return;
+    if (sceneObjects.length === 1) {
+        selectObject(sceneObjects[0]);
+        return;
+    }
+    deselectObject();
+
+    // Create a group parent at the centroid
+    const centroid = new THREE.Vector3();
+    for (const entry of sceneObjects) centroid.add(entry.mesh.position);
+    centroid.divideScalar(sceneObjects.length);
+
+    groupParent = new THREE.Group();
+    groupParent.position.copy(centroid);
+    scene.add(groupParent);
+
+    // Reparent all meshes into the group
+    groupedOriginalPositions = [];
+    for (const entry of sceneObjects) {
+        groupedOriginalPositions.push(entry.mesh.position.clone());
+        scene.remove(entry.mesh);
+        entry.mesh.position.sub(centroid); // offset relative to group center
+        groupParent.add(entry.mesh);
+    }
+
+    // Compute merged bounding box for the group
+    const mergedBox = new THREE.Box3();
+    for (const entry of sceneObjects) {
+        entry.mesh.geometry.computeBoundingBox();
+        const childBox = entry.mesh.geometry.boundingBox.clone();
+        childBox.min.multiply(entry.mesh.scale).add(entry.mesh.position);
+        childBox.max.multiply(entry.mesh.scale).add(entry.mesh.position);
+        mergedBox.union(childBox);
+    }
+    const size = new THREE.Vector3();
+    mergedBox.getSize(size);
+
+    // Create a virtual entry for the group
+    const groupGeo = new THREE.BoxGeometry(size.x, size.y, size.z);
+    const groupEntry = {
+        mesh: groupParent,
+        name: 'group',
+        _isGroup: true,
+        _groupGeo: groupGeo,
+    };
+
+    // Box helper around all
+    selectedBoxHelper = new THREE.Box3Helper(mergedBox, 0xe07020);
+    groupParent.add(selectedBoxHelper);
+
+    // Axes
+    const axisSize = Math.max(size.x, size.y, size.z) * 1.5;
+    selectedAxesHelper = new THREE.AxesHelper(axisSize);
+    selectedAxesHelper.material.depthTest = false;
+    selectedAxesHelper.renderOrder = 999;
+    groupParent.add(selectedAxesHelper);
+
+    selectedObject = groupEntry;
+    setCommandStatus(`Selected all ${sceneObjects.length} objects as group — drag to move, rotate, scale`);
+}
+
+function ungroupAllObjects() {
+    if (!groupParent) return;
+    // Reparent meshes back to scene with correct world transforms
+    const groupWorldPos = groupParent.position.clone();
+    const groupWorldQuat = groupParent.quaternion.clone();
+    const groupWorldScale = groupParent.scale.clone();
+
+    // Remove helpers from group first
+    if (selectedBoxHelper) {
+        groupParent.remove(selectedBoxHelper);
+        selectedBoxHelper.dispose();
+        selectedBoxHelper = null;
+    }
+    if (selectedAxesHelper) {
+        groupParent.remove(selectedAxesHelper);
+        selectedAxesHelper.dispose();
+        selectedAxesHelper = null;
+    }
+
+    for (const entry of sceneObjects) {
+        // Get current world position from group
+        entry.mesh.updateMatrixWorld(true);
+        const worldPos = new THREE.Vector3();
+        const worldQuat = new THREE.Quaternion();
+        const worldScale = new THREE.Vector3();
+        entry.mesh.matrixWorld.decompose(worldPos, worldQuat, worldScale);
+
+        groupParent.remove(entry.mesh);
+        entry.mesh.position.copy(worldPos);
+        entry.mesh.quaternion.copy(worldQuat);
+        entry.mesh.scale.copy(worldScale);
+        scene.add(entry.mesh);
+    }
+
+    scene.remove(groupParent);
+    groupParent = null;
+    groupedOriginalPositions = [];
 }
 
 function updateSelectedOutline() {
@@ -530,8 +759,10 @@ function updateSelectedOutline() {
         selectedOutline.matrix.copy(selectedObject.mesh.matrixWorld).scale(new THREE.Vector3(1.05, 1.05, 1.05));
     }
     if (selectedBoxHelper) {
-        selectedBoxHelper.update();
+        if (typeof selectedBoxHelper.update === 'function') selectedBoxHelper.update();
     }
+    // Skip axes/anchor updates for group selections (no geometry on Group)
+    if (selectedObject._isGroup) return;
     // Update axes size if scale changed
     if (selectedAxesHelper) {
         selectedObject.mesh.geometry.computeBoundingSphere();
@@ -543,6 +774,7 @@ function updateSelectedOutline() {
         selectedAxesHelper.renderOrder = 999;
         selectedObject.mesh.add(selectedAxesHelper);
     }
+    updateAnchorPositions(selectedObject);
 }
 
 function mergeAllObjects() {
@@ -823,7 +1055,16 @@ function enterAddShapeMode(shapeName) {
     createAddShapePreview(addShapeType);
     // Normalize default scale: target ~0.3 units radius regardless of shape
     addShapeScale = addShapeBaseRadius > 0.01 ? 0.3 / addShapeBaseRadius : 0.5;
-    setCommandStatus(`Add Shape: ${SHAPE_LABELS[addShapeType] || addShapeType} — hover to position, scroll to resize, click to place`);
+    // Show preview at center immediately so it's visible
+    addShapePosition.set(0, 0, 0);
+    addShapeHitNormal.set(0, 0, 1);
+    addShapeSurfaceHit.set(0, 0, 0);
+    addShapeVisible = true;
+    if (addShapePreviewMesh) {
+        addShapePreviewMesh.position.set(0, 0, 0);
+        addShapePreviewMesh.visible = true;
+    }
+    setCommandStatus(`Add Shape: ${SHAPE_LABELS[addShapeType] || addShapeType} — hover to position, click to place`);
     const addBtn = document.getElementById('add-shape-btn');
     if (addBtn) addBtn.classList.add('active');
 }
@@ -964,6 +1205,18 @@ function snapshot() {
         scale: mesh.scale.toArray(),
         position: mesh.position.toArray(),
         rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+        // Save scene objects state
+        sceneObjectStates: sceneObjects.map(o => ({
+            name: o.name,
+            position: o.mesh.position.toArray(),
+            rotation: [o.mesh.rotation.x, o.mesh.rotation.y, o.mesh.rotation.z],
+            quaternion: o.mesh.quaternion.toArray(),
+            scale: o.mesh.scale.toArray(),
+        })),
+        // Save camera state
+        cameraPos: camera.position.toArray(),
+        cameraQuat: camera.quaternion.toArray(),
+        orbitTargetArr: orbitTarget.toArray(),
     };
 }
 function saveUndo() {
@@ -984,7 +1237,6 @@ function undo() {
     safeComputeNormals();
     refreshWireframe();
     material.color.setHex(s.color);
-    // Fix black glitch: reset vertexColors if geometry has no color attribute
     if (!g.attributes.color) {
         material.vertexColors = false;
     }
@@ -992,6 +1244,24 @@ function undo() {
     mesh.scale.fromArray(s.scale);
     mesh.position.fromArray(s.position);
     mesh.rotation.set(s.rotation[0], s.rotation[1], s.rotation[2]);
+    // Restore scene objects state
+    if (s.sceneObjectStates) {
+        for (let i = 0; i < s.sceneObjectStates.length && i < sceneObjects.length; i++) {
+            const st = s.sceneObjectStates[i];
+            const o = sceneObjects[i];
+            o.mesh.position.fromArray(st.position);
+            o.mesh.quaternion.fromArray(st.quaternion);
+            o.mesh.scale.fromArray(st.scale);
+        }
+        updateSelectedOutline();
+    }
+    // Restore camera state
+    if (s.cameraPos) {
+        camera.position.fromArray(s.cameraPos);
+        camera.quaternion.fromArray(s.cameraQuat);
+        orbitTarget.fromArray(s.orbitTargetArr);
+        camera.lookAt(orbitTarget);
+    }
     // Re-apply abstract gradient + update rest positions if in abstract mode
     if (currentAppMode === 'abstract') {
         applyBlobGradient();
@@ -1237,13 +1507,19 @@ function moldAt(point, dx, dy) {
 
 // Mirror mesh across an axis
 function mirrorMesh(axis = 'x') {
+    // Auto-select first object if nothing selected
+    if (!selectedObject && sceneObjects.length > 0) selectObject(sceneObjects[0]);
+    const target = selectedObject ? selectedObject.mesh : mesh;
+    if (!target || !target.geometry) return;
+    const prevMesh = mesh;
+    mesh = target;
     saveUndo();
-    const p = mesh.geometry.attributes.position;
+    const p = target.geometry.attributes.position;
     const count = p.count;
     // Duplicate all vertices mirrored
     const newPos = new Float32Array(count * 6);
     const newNorm = new Float32Array(count * 6);
-    const n = mesh.geometry.attributes.normal;
+    const n = target.geometry.attributes.normal;
     newPos.set(p.array, 0);
     newNorm.set(n.array, 0);
     for (let i = 0; i < count; i++) {
@@ -1258,17 +1534,25 @@ function mirrorMesh(axis = 'x') {
     const mg = new THREE.BufferGeometry();
     mg.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
     mg.setAttribute('normal', new THREE.BufferAttribute(newNorm, 3));
-    mesh.geometry.dispose();
-    mesh.geometry = mg;
+    target.geometry.dispose();
+    target.geometry = mg;
     safeComputeNormals();
     refreshWireframe();
+    mesh = prevMesh;
+    updateSelectedOutline();
     setCommandStatus('Mirrored across ' + axis.toUpperCase());
 }
 
 // Array: duplicate N times along a direction
 function arrayMesh(count, direction) {
+    // Auto-select first object if nothing selected
+    if (!selectedObject && sceneObjects.length > 0) selectObject(sceneObjects[0]);
+    const target = selectedObject ? selectedObject.mesh : mesh;
+    if (!target || !target.geometry) return;
+    const prevMesh = mesh;
+    mesh = target;
     saveUndo();
-    const p = mesh.geometry.attributes.position;
+    const p = target.geometry.attributes.position;
     const srcCount = p.count;
 
     const newVerts = [];
@@ -1292,10 +1576,12 @@ function arrayMesh(count, direction) {
 
     const mg = new THREE.BufferGeometry();
     mg.setAttribute('position', new THREE.BufferAttribute(mp, 3));
-    mesh.geometry.dispose();
-    mesh.geometry = mg;
+    target.geometry.dispose();
+    target.geometry = mg;
     safeComputeNormals();
     refreshWireframe();
+    mesh = prevMesh;
+    updateSelectedOutline();
     setCommandStatus(`Arrayed ${count} copies`);
 }
 
@@ -1699,21 +1985,25 @@ function applyAppMode(name) {
 
     const modelActions = document.getElementById('model-actions');
     const sketchActions = document.getElementById('sketch-actions');
+    const freeformActions = document.getElementById('freeform-actions');
     const sketchCanvas = document.getElementById('sketch-canvas');
     const canvasContainer = document.getElementById('canvas-container');
     const spliceWrap = document.getElementById('splice-toolbar-wrap');
     const guide = document.getElementById('instructions-guide');
     const sketchGuide = document.getElementById('sketch-guide');
+    const freeformGuide = document.getElementById('freeform-guide');
     const galleryView = document.getElementById('gallery-view');
 
     // Hide everything first
     if (modelActions) modelActions.style.display = 'none';
     if (sketchActions) sketchActions.style.display = 'none';
+    if (freeformActions) freeformActions.style.display = 'none';
     if (sketchCanvas) sketchCanvas.style.display = 'none';
     if (canvasContainer) canvasContainer.style.display = 'none';
     if (spliceWrap) spliceWrap.style.display = 'none';
     if (guide) guide.style.display = 'none';
     if (sketchGuide) sketchGuide.style.display = 'none';
+    if (freeformGuide) freeformGuide.style.display = 'none';
     if (galleryView) galleryView.style.display = 'none';
 
     grid.visible = false;
@@ -1722,20 +2012,46 @@ function applyAppMode(name) {
         b.classList.toggle('active', b.dataset.appmode === name));
 
     if (name === 'model') {
-        if (modelActions) modelActions.style.display = '';
-        if (canvasContainer) canvasContainer.style.display = '';
-        if (spliceWrap) spliceWrap.style.display = '';
-        if (guide) guide.style.display = '';
+        if (modelActions) modelActions.style.removeProperty('display');
+        if (canvasContainer) canvasContainer.style.removeProperty('display');
+        if (spliceWrap) spliceWrap.style.removeProperty('display');
+        if (guide) guide.style.removeProperty('display');
         grid.visible = true;
-        // Don't restore state — scene is already intact
+        resetCamera();
+        renderer.setSize(innerWidth, innerHeight);
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        // Auto-add a default sphere if scene is empty
+        if (sceneObjects.length === 0) {
+            const entry = addSceneObject('sphere', new THREE.Vector3(0, 0, 0), 0.5);
+            selectObject(entry);
+            setCommandStatus('Welcome! Sphere added. Use + Add for more shapes.');
+        }
     } else if (name === 'sketch') {
-        if (sketchActions) sketchActions.style.display = '';
+        if (sketchActions) sketchActions.style.removeProperty('display');
         if (sketchCanvas) sketchCanvas.style.display = 'block';
-        if (sketchGuide) sketchGuide.style.display = '';
+        if (sketchGuide) sketchGuide.style.removeProperty('display');
         initSketchCanvas();
     } else if (name === 'gallery') {
         if (galleryView) galleryView.style.display = 'block';
         renderGallery();
+    } else if (name === 'freeform') {
+        if (freeformActions) freeformActions.style.removeProperty('display');
+        if (canvasContainer) canvasContainer.style.removeProperty('display');
+        if (freeformGuide) freeformGuide.style.removeProperty('display');
+        grid.visible = true;
+        resetCamera();
+        renderer.setSize(innerWidth, innerHeight);
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        // Auto-add a starter cube if scene is empty
+        if (sceneObjects.length === 0) {
+            const entry = addSceneObject('cube', new THREE.Vector3(0, 0, 0), 0.5);
+            selectObject(entry);
+            setCommandStatus('Freeform mode! Add shapes & sculpt with your hands.');
+        } else {
+            setCommandStatus('Freeform mode — pinch to grab, palm to rotate, add shapes from toolbar');
+        }
     }
 }
 
@@ -1850,6 +2166,29 @@ let sketchColor = '#333333';
 let sketchTool = 'pencil';
 let isSketchDrawing = false;
 let lastSketchPt = null;
+const sketchUndoStack = [];
+const SKETCH_UNDO_MAX = 30;
+
+function saveSketchUndo() {
+    const canvas = document.getElementById('sketch-canvas');
+    if (!canvas) return;
+    sketchUndoStack.push(canvas.toDataURL());
+    if (sketchUndoStack.length > SKETCH_UNDO_MAX) sketchUndoStack.shift();
+}
+
+function undoSketch() {
+    if (!sketchUndoStack.length) { setCommandStatus('Nothing to undo in sketch'); return; }
+    const canvas = document.getElementById('sketch-canvas');
+    if (!canvas || !sketchCtx) return;
+    const dataURL = sketchUndoStack.pop();
+    const img = new Image();
+    img.onload = () => {
+        sketchCtx.clearRect(0, 0, canvas.width, canvas.height);
+        sketchCtx.drawImage(img, 0, 0);
+    };
+    img.src = dataURL;
+    setCommandStatus(`Sketch undo (${sketchUndoStack.length} left)`);
+}
 
 const SKETCH_TOOLS = {
     pencil:  { size: 3,  opacity: 0.85, blur: 0,   cap: 'round',  composite: 'source-over', jitter: 0.3 },
@@ -1938,7 +2277,7 @@ function exportSketchSVG(template = 'custom') {
 // ============================================================
 const GESTURE_SMOOTHING = 0.3; // EMA alpha
 const GESTURE_BUFFER_SIZE = 10;
-const PINCH_THRESHOLD = 0.04;
+const PINCH_THRESHOLD = 0.09;
 const DEAD_ZONE = 0.005;
 const MODE_LOCK_MS = 150;
 const CUPPED_HOLD_MS = 500;
@@ -2010,7 +2349,8 @@ function isHandInZone(hand) {
 }
 
 function isPinch(hand) {
-    return dist3D(hand[4], hand[8]) < PINCH_THRESHOLD;
+    // Use 2D distance only (X,Y) — Z from MediaPipe is noisy
+    return Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y) < PINCH_THRESHOLD;
 }
 
 function isFist(hand) {
@@ -2754,8 +3094,1298 @@ async function initHandTracking() {
 }
 
 function detectHands() {
-    // Hand tracking removed
-    return;
+    if (!handTrackingActive || !handLandmarker) return;
+    const now = performance.now();
+    if (now - lastDetectTime < DETECT_INTERVAL_MS) return;
+    lastDetectTime = now;
+    const video = document.getElementById('webcam');
+    if (video.readyState < 2) return;
+    const result = handLandmarker.detectForVideo(video, performance.now());
+
+    if (result.landmarks && result.landmarks.length > 0) {
+        const smoothed = processLandmarks(result.landmarks);
+        const handedness = result.handedness || [];
+
+        // Separate left and right hands
+        // Determine left/right hand by wrist x-position instead of MediaPipe labels
+        // In camera image coords (0=left, 1=right), mirrored:
+        //   User's LEFT hand → right side of image → higher x
+        //   User's RIGHT hand → left side of image → lower x
+        let leftHand = null, rightHand = null;
+        if (smoothed.length === 2) {
+            const wristX0 = smoothed[0][0].x; // wrist landmark
+            const wristX1 = smoothed[1][0].x;
+            // Higher x = user's left hand (mirrored camera)
+            if (wristX0 > wristX1) {
+                leftHand = smoothed[0];
+                rightHand = smoothed[1];
+            } else {
+                leftHand = smoothed[1];
+                rightHand = smoothed[0];
+            }
+        } else if (smoothed.length === 1) {
+            // Single hand: use x position relative to center
+            const wristX = smoothed[0][0].x;
+            if (wristX > 0.5) {
+                leftHand = smoothed[0]; // right side of image = user's left
+            } else {
+                rightHand = smoothed[0]; // left side of image = user's right
+            }
+        }
+
+        // Process gesture modes (wrapped in try-catch so debug always draws)
+        try {
+            processGestureModes(leftHand, rightHand);
+        } catch (e) {
+            console.error('Gesture error:', e);
+            setCommandStatus('Gesture error: ' + e.message);
+        }
+
+        if (isDebug) drawDebugHands(result.landmarks, handedness);
+    } else {
+        currentGesture = null;
+        landmarkInited = [false, false];
+        hideGesturePointer();
+        if (isDebug) clearDebugCanvas();
+    }
+}
+
+// ============================================================
+// GESTURE MODE SYSTEM — Left hand fingers = mouse state, Right hand = cursor
+// ============================================================
+const GM_CIRCUMFERENCE = 2 * Math.PI * 16; // matches SVG circle r=16
+const DEFAULT_MODES = ['leftclick', 'rightclick', 'zoom', 'free'];
+let gmSlots = [...DEFAULT_MODES];
+let gmActiveSlot = 0; // currently active slot index (for mouse-clickable bar)
+let gmRightLastX = 0, gmRightLastY = 0;
+let gmRightSmX = 0, gmRightSmY = 0;
+let gmMouseDown = false; // is a simulated mouse button currently held
+let gmMouseButton = -1;  // which button is held (0=left, 2=right)
+let gmFreezeCursor = false; // free move mode: cursor stays still, toggled on/off
+let gmUndoSaved = false; // track if undo was saved for current gesture drag
+let gmKeyboardMode = -1; // -1 = off, 0-4 = keyboard-activated mode (bypasses left hand)
+let gmFreeToggleCooldown = 0; // timestamp until free move toggle is blocked (hand only)
+const GM_FREE_COOLDOWN_MS = 5000; // 5 second cooldown after hand toggle
+
+// Dwell-to-select in free move mode
+let gmDwellTarget = null;  // scene object entry being hovered
+let gmDwellStart = 0;      // timestamp when dwell started
+const GM_DWELL_MS = 1500;  // 1.5 seconds to select
+
+// Gesture state machine
+let gmState = 'idle';
+let gmPrevState = 'idle';
+let gmFistFrames = 0;
+const GM_FIST_FRAMES = 3;
+let gmWasFist = false;
+let gmGestureActive = 'none';
+let gmTwoPalmLastDist = 0;
+let gmPrePinchPointerX = 0; // pointer position captured before pinch shifted it
+let gmPrePinchPointerY = 0;
+let gmPinchStartX = 0;
+let gmPinchStartY = 0;
+let gmPinchStartHandScale = 0; // hand size at pinch start for depth-based scaling
+let gmPinchUndoSaved = false;
+let gmLeftSmX = 0, gmLeftSmY = 0;
+let gmLeftPrevX = 0, gmLeftPrevY = 0;
+let gmTwoPinchLastDist = 0;
+let gmTwoPinchLastX = 0;
+let gmTwoPinchLastY = 0;
+let gmTwoPinchUndoSaved = false;
+
+// Rotation momentum (spin)
+let gmSpinVelX = 0, gmSpinVelY = 0;
+const GM_SPIN_DAMPING = 0.92;
+const GM_SPIN_MIN = 0.0001;
+
+// Stub functions for removed gesture mode bar system
+function gmReleaseMouseIfHeld() { gmMouseDown = false; gmMouseButton = -1; }
+function updateGMSlotUI() {}
+function showGestureModeBar() {}
+function hideGestureModeBar() {}
+function highlightGMSlot() {}
+function resetGMSlots() {}
+
+// ============================================================
+// FREEFORM MODE — Natural hand gesture engine
+// ============================================================
+
+// Freeform state (isolated from model mode)
+let ffGrabbed = false;       // currently holding an object via pinch
+let ffPinchFrames = 0;       // frames since pinch detected
+let ffPinchActive = false;   // pinch was confirmed
+let ffUndoSaved = false;
+let ffPinchStartHandScale = 0;
+let ffSmX = 0, ffSmY = 0;           // smoothed right palm screen coords
+let ffPrevX = 0, ffPrevY = 0;       // previous frame smoothed coords
+let ffLeftSmX = 0, ffLeftSmY = 0;   // smoothed left palm screen coords
+let ffLeftPrevX = 0, ffLeftPrevY = 0;
+let ffTwoPalmDist = 0;
+let ffTwoPinchDist = 0;
+let ffTwoFistDist = 0;
+let ffThreeFingerLastY = [0, 0]; // per-hand Y tracking for 3-finger push
+let ffThreeFingerUndoSaved = false;
+let ffPrePinchX = 0, ffPrePinchY = 0; // pointer position before pinch shifted it
+let ffDraggingAnchor = null; // anchor handle being dragged via pinch
+let ffAnchorDragAxis = null;
+let ffAnchorDragSign = 0;
+let ffGestureActive = 'none';
+
+// Find nearest anchor handle to screen position (proximity, not raycast)
+function findNearestAnchor(screenX, screenY, tolerancePx) {
+    tolerancePx = tolerancePx || 50;
+    if (!selectedAnchors.length) return null;
+    let bestAnchor = null;
+    let bestDist = tolerancePx;
+    for (const anchor of selectedAnchors) {
+        const worldPos = new THREE.Vector3();
+        anchor.getWorldPosition(worldPos);
+        worldPos.project(camera);
+        const sx = (worldPos.x * 0.5 + 0.5) * innerWidth;
+        const sy = (-worldPos.y * 0.5 + 0.5) * innerHeight;
+        const dist = Math.hypot(sx - screenX, sy - screenY);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestAnchor = anchor;
+        }
+    }
+    return bestAnchor;
+}
+
+// Wider hit detection: raycast first, then bounding-sphere proximity fallback
+function findNearestObject(screenX, screenY, tolerancePx) {
+    tolerancePx = tolerancePx || 60;
+    const ndc = new THREE.Vector2(
+        (screenX / innerWidth) * 2 - 1,
+        -(screenY / innerHeight) * 2 + 1
+    );
+    raycaster.setFromCamera(ndc, camera);
+
+    // 1) Normal raycast
+    const allMeshes = [];
+    for (const entry of sceneObjects) {
+        allMeshes.push(entry.mesh);
+        entry.mesh.traverse(child => { if (child.isMesh) allMeshes.push(child); });
+    }
+    const hits = raycaster.intersectObjects(allMeshes, false);
+    if (hits.length > 0) {
+        let hitObj = hits[0].object;
+        while (hitObj) {
+            const entry = sceneObjects.find(o => o.mesh === hitObj);
+            if (entry) return entry;
+            hitObj = hitObj.parent;
+        }
+    }
+
+    // 2) Bounding-sphere proximity fallback
+    let bestEntry = null;
+    let bestDist = tolerancePx;
+    for (const entry of sceneObjects) {
+        const pos = entry.mesh.position.clone();
+        pos.project(camera);
+        const sx = (pos.x * 0.5 + 0.5) * innerWidth;
+        const sy = (-pos.y * 0.5 + 0.5) * innerHeight;
+        const dist = Math.hypot(sx - screenX, sy - screenY);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestEntry = entry;
+        }
+    }
+    return bestEntry;
+}
+
+function processFreeformGestures(leftHand, rightHand) {
+    if (!rightHand) {
+        hideGesturePointer();
+        ffPinchFrames = 0;
+        ffPinchActive = false;
+        ffGrabbed = false;
+        ffGestureActive = 'none';
+        return;
+    }
+
+    // --- Helpers (reuse from model mode pattern) ---
+    function countExt(hand) {
+        if (!hand) return 0;
+        let n = 0;
+        if (hand[8].y < hand[6].y) n++;
+        if (hand[12].y < hand[10].y) n++;
+        if (hand[16].y < hand[14].y) n++;
+        if (hand[20].y < hand[18].y) n++;
+        const thumbDist = Math.hypot(hand[4].x - hand[17].x, hand[4].y - hand[17].y);
+        if (thumbDist > 0.1) n++;
+        return n;
+    }
+    function isOpenPalmFF(hand) { return hand && countExt(hand) >= 5; }
+    function isFistFF(hand) { return hand && countExt(hand) <= 1; }
+    function isCuppedFF(hand) {
+        if (!hand) return false;
+        const palm = hand[0];
+        let curled = 0;
+        for (const idx of [8, 12, 16, 20]) {
+            const mcp = hand[idx - 3];
+            const tip = hand[idx];
+            if (Math.hypot(tip.x - palm.x, tip.y - palm.y) < Math.hypot(mcp.x - palm.x, mcp.y - palm.y)) curled++;
+        }
+        return curled >= 3 && !isPinch(hand) && !isFistFF(hand);
+    }
+    function isPointingFF(hand) {
+        if (!hand) return false;
+        const palm = hand[0];
+        const indexExt = Math.hypot(hand[8].x - palm.x, hand[8].y - palm.y) > 0.14;
+        const middleCurled = Math.hypot(hand[12].x - palm.x, hand[12].y - palm.y) < 0.12;
+        const ringCurled = Math.hypot(hand[16].x - palm.x, hand[16].y - palm.y) < 0.12;
+        return indexExt && middleCurled && ringCurled && !isPinch(hand);
+    }
+
+    // --- Update pointer & smoothed positions ---
+    updateGesturePointer(rightHand);
+
+    const rPalm = rightHand[9];
+    const rScreenX = (1 - rPalm.x) * innerWidth;
+    const rScreenY = rPalm.y * innerHeight;
+    ffPrevX = ffSmX;
+    ffPrevY = ffSmY;
+    ffSmX = ffSmX * 0.35 + rScreenX * 0.65;
+    ffSmY = ffSmY * 0.35 + rScreenY * 0.65;
+
+    if (leftHand) {
+        const lPalm = leftHand[9];
+        const lsx = (1 - lPalm.x) * innerWidth;
+        const lsy = lPalm.y * innerHeight;
+        ffLeftPrevX = ffLeftSmX;
+        ffLeftPrevY = ffLeftSmY;
+        ffLeftSmX = ffLeftSmX * 0.35 + lsx * 0.65;
+        ffLeftSmY = ffLeftSmY * 0.35 + lsy * 0.65;
+    }
+
+    // --- Classify gestures ---
+    const rightPinch = isPinch(rightHand);
+    const rightOpen = isOpenPalmFF(rightHand);
+    const rightFist = isFistFF(rightHand);
+    const rightCupped = isCuppedFF(rightHand);
+    const rightPointing = isPointingFF(rightHand);
+    const leftOpen = leftHand ? isOpenPalmFF(leftHand) : false;
+    const leftPinch = leftHand ? isPinch(leftHand) : false;
+    const leftFist = leftHand ? isFistFF(leftHand) : false;
+
+    // 3-finger detector: index + middle + ring extended, pinky + thumb curled
+    function isThreeFingers(hand) {
+        if (!hand) return false;
+        const palm = hand[0];
+        const indexExt = Math.hypot(hand[8].x - palm.x, hand[8].y - palm.y) > 0.12;
+        const middleExt = Math.hypot(hand[12].x - palm.x, hand[12].y - palm.y) > 0.12;
+        const ringExt = Math.hypot(hand[16].x - palm.x, hand[16].y - palm.y) > 0.12;
+        const pinkyCurled = Math.hypot(hand[20].x - palm.x, hand[20].y - palm.y) < 0.11;
+        const thumbCurled = Math.hypot(hand[4].x - palm.x, hand[4].y - palm.y) < 0.12;
+        return indexExt && middleExt && ringExt && pinkyCurled && thumbCurled;
+    }
+    const rightThree = isThreeFingers(rightHand);
+    const leftThree = leftHand ? isThreeFingers(leftHand) : false;
+
+    // --- Snapshot pointer before pinch shifts it ---
+    if (!rightPinch) {
+        ffPrePinchX = gpSmoothX;
+        ffPrePinchY = gpSmoothY;
+    }
+
+    // --- HOVER: always raycast for highlight (when not pinching) ---
+    if (!rightPinch && !rightCupped && sceneObjects.length > 0) {
+        const hoverEntry = findNearestObject(gpSmoothX, gpSmoothY, 80);
+        setHoveredObject(hoverEntry);
+    } else if (rightPinch) {
+        clearHoveredObject();
+    }
+
+    // ========================
+    // A. FIST = FREEZE
+    // ========================
+    if (rightFist && !rightPinch) {
+        setCommandStatus('✊ Frozen — fist held');
+        ffGestureActive = 'freeze';
+        return;
+    }
+
+    // ========================
+    // B. TWO OPEN PALMS (no selection) = ZOOM
+    // ========================
+    if (rightOpen && leftOpen && !selectedObject) {
+        const rp = rightHand[9], lp = leftHand[9];
+        const d = Math.hypot(rp.x - lp.x, rp.y - lp.y);
+        if (ffTwoPalmDist > 0) {
+            const delta = d - ffTwoPalmDist;
+            if (Math.abs(delta) > 0.003) {
+                doCameraZoom(-delta * 300);
+            }
+        }
+        ffTwoPalmDist = d;
+        setCommandStatus('🖐🖐 Zoom — spread/close hands');
+        ffGestureActive = 'zoom';
+        return;
+    }
+    ffTwoPalmDist = 0;
+
+    // ========================
+    // C. LEFT OPEN PALM + SELECTED = ROTATE selected object
+    // ========================
+    if (leftOpen && selectedObject && !rightPinch) {
+        const dx = ffLeftSmX - ffLeftPrevX;
+        const dy = ffLeftSmY - ffLeftPrevY;
+        if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
+            if (ffGestureActive !== 'left-rotating') { saveUndo(); }
+            const angleY = dx * 0.005;
+            const angleX = dy * 0.005;
+            const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+            const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+            selectedObject.mesh.quaternion.premultiply(qX.clone().multiply(qY));
+            updateSelectedOutline();
+            setCommandStatus(`🖐 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name} (left hand)`);
+            ffGestureActive = 'left-rotating';
+        }
+    }
+
+    // ========================
+    // D. TWO PINCHES + SELECTED = STRETCH/SCALE with both hands
+    // ========================
+    if (rightPinch && leftPinch && selectedObject) {
+        const rp = { x: (rightHand[4].x + rightHand[8].x) / 2, y: (rightHand[4].y + rightHand[8].y) / 2 };
+        const lp = { x: (leftHand[4].x + leftHand[8].x) / 2, y: (leftHand[4].y + leftHand[8].y) / 2 };
+        const d = Math.hypot(rp.x - lp.x, rp.y - lp.y);
+        if (ffTwoPinchDist > 0) {
+            const delta = d - ffTwoPinchDist;
+            if (Math.abs(delta) > 0.003) {
+                if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
+                const factor = 1 + delta * 3;
+                selectedObject.mesh.scale.multiplyScalar(Math.max(0.1, Math.min(5.0, factor)));
+                updateSelectedOutline();
+                setCommandStatus(`👌👌 Scaling ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            }
+        }
+        ffTwoPinchDist = d;
+        ffGestureActive = 'two-pinch-scale';
+        return;
+    }
+    ffTwoPinchDist = 0;
+
+    // ========================
+    // E. PINCH = GRAB, MOVE, SCALE (depth), or EXTRUDE (anchor drag)
+    // ========================
+    if (rightPinch) {
+        if (!ffPinchActive) {
+            ffPinchFrames++;
+            if (ffPinchFrames >= 1) {
+                ffPinchActive = true;
+                ffUndoSaved = false;
+                ffDraggingAnchor = null;
+                ffPinchStartHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+
+                // Check if pinching near an anchor handle first (extrude mode)
+                if (selectedObject && selectedAnchors.length > 0) {
+                    const nearAnchor = findNearestAnchor(ffPrePinchX, ffPrePinchY, 60);
+                    if (nearAnchor) {
+                        ffDraggingAnchor = nearAnchor;
+                        ffAnchorDragAxis = nearAnchor.userData.axis;
+                        ffAnchorDragSign = nearAnchor.userData.sign;
+                        ffGrabbed = false;
+                        saveUndo();
+                        ffUndoSaved = true;
+                        setCommandStatus(`👌 Grabbed ${ffAnchorDragAxis.toUpperCase()} handle — drag to extrude`);
+                        return;
+                    }
+                }
+
+                // Select object under pre-pinch pointer (wider hit detection)
+                const entry = findNearestObject(ffPrePinchX, ffPrePinchY, 80);
+                if (entry) {
+                    clearHoveredObject();
+                    selectObject(entry);
+                    ffGrabbed = true;
+                    setCommandStatus(`👌 Grabbed ${SHAPE_LABELS[entry.name] || entry.name} — drag to move, push/pull to scale`);
+                } else if (hoveredObject) {
+                    const hov = hoveredObject;
+                    clearHoveredObject();
+                    selectObject(hov);
+                    ffGrabbed = true;
+                    setCommandStatus(`👌 Grabbed ${SHAPE_LABELS[hov.name] || hov.name} — drag to move, push/pull to scale`);
+                } else if (selectedObject) {
+                    deselectObject();
+                    ffGrabbed = false;
+                    setCommandStatus('👌 Released — pinch on a shape to grab it');
+                }
+            }
+        } else if (ffDraggingAnchor && selectedObject) {
+            // --- ANCHOR DRAG: extrude/scale along locked axis ---
+            const dx = ffSmX - ffPrevX;
+            const dy = ffSmY - ffPrevY;
+            const scaleSpeed = 0.006;
+            const delta = (Math.abs(dx) > Math.abs(dy) ? dx : -dy) * scaleSpeed * ffAnchorDragSign;
+            if (Math.abs(delta) > 0.0001) {
+                const s = selectedObject.mesh.scale;
+                if (ffAnchorDragAxis === 'x') s.x = Math.max(0.05, s.x + delta);
+                else if (ffAnchorDragAxis === 'y') s.y = Math.max(0.05, s.y + delta);
+                else if (ffAnchorDragAxis === 'z') s.z = Math.max(0.05, s.z + delta);
+                updateSelectedOutline();
+                setCommandStatus(`👌 Extruding ${ffAnchorDragAxis.toUpperCase()}: ${s[ffAnchorDragAxis].toFixed(2)}`);
+            }
+            ffGestureActive = 'anchor-extrude';
+        } else if (ffGrabbed && selectedObject) {
+            // --- PINCH HELD: MOVE (lat drag) + SCALE (depth) ---
+            if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
+
+            // MOVE: lateral drag translates in camera plane
+            const dx = ffSmX - ffPrevX;
+            const dy = ffSmY - ffPrevY;
+            if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
+                const camRightV = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const camUpV = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                const moveSpeed = 0.004 * camera.position.distanceTo(selectedObject.mesh.position);
+                selectedObject.mesh.position.add(camRightV.clone().multiplyScalar(dx * moveSpeed));
+                selectedObject.mesh.position.add(camUpV.clone().multiplyScalar(-dy * moveSpeed));
+                updateSelectedOutline();
+                setCommandStatus(`👌 Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                ffGestureActive = 'moving';
+            }
+
+            // SCALE: hand size change (push/pull = depth)
+            const currentHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+            const scaleDelta = currentHandScale - ffPinchStartHandScale;
+            if (Math.abs(scaleDelta) > 0.006) {
+                const factor = 1 + scaleDelta * 2;
+                selectedObject.mesh.scale.multiplyScalar(Math.max(0.5, Math.min(2.0, factor)));
+                ffPinchStartHandScale = currentHandScale;
+                updateSelectedOutline();
+                if (ffGestureActive !== 'moving') {
+                    setCommandStatus(`👌 Scaling ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                    ffGestureActive = 'scaling';
+                }
+            }
+
+            // LEFT PALM simultaneous rotate while right pinch moves
+            if (leftOpen && selectedObject) {
+                const ldx = ffLeftSmX - ffLeftPrevX;
+                const ldy = ffLeftSmY - ffLeftPrevY;
+                if (Math.abs(ldx) > 0.3 || Math.abs(ldy) > 0.3) {
+                    const angleY = ldx * 0.005;
+                    const angleX = ldy * 0.005;
+                    const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                    const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                    selectedObject.mesh.quaternion.premultiply(qX.clone().multiply(qY));
+                    updateSelectedOutline();
+                }
+            }
+        }
+        ffGestureActive = ffGestureActive || 'grabbing';
+        return;
+    }
+    // Release pinch = drop in place (object stays, remains selected)
+    if (!rightPinch && ffPinchActive) {
+        if (ffDraggingAnchor) {
+            setCommandStatus(`Extruded ${ffAnchorDragAxis.toUpperCase()} — pinch another handle or grab to move`);
+            ffDraggingAnchor = null;
+            ffAnchorDragAxis = null;
+            ffAnchorDragSign = 0;
+        } else if (ffGrabbed && selectedObject) {
+            setCommandStatus(`Placed ${SHAPE_LABELS[selectedObject.name] || selectedObject.name} — palm to rotate, pinch to grab again`);
+        }
+        ffPinchFrames = 0;
+        ffPinchActive = false;
+        ffGrabbed = false;
+        ffUndoSaved = false;
+    }
+
+    // ========================
+    // F. TWO FISTS + SELECTED = EXTRUDE/SCALE (push together = shrink, pull apart = grow)
+    // ========================
+    if (rightFist && leftFist && selectedObject) {
+        const rWrist = rightHand[0], lWrist = leftHand[0];
+        const d = Math.hypot(rWrist.x - lWrist.x, rWrist.y - lWrist.y);
+        if (ffTwoFistDist > 0) {
+            const delta = d - ffTwoFistDist;
+            if (Math.abs(delta) > 0.003) {
+                if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
+                const factor = 1 + delta * 3;
+                selectedObject.mesh.scale.multiplyScalar(Math.max(0.1, Math.min(5.0, factor)));
+                updateSelectedOutline();
+                const action = delta > 0 ? 'Stretching' : 'Squishing';
+                setCommandStatus(`✊✊ ${action} ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            }
+        }
+        ffTwoFistDist = d;
+        ffGestureActive = 'two-fist-scale';
+        return;
+    }
+    ffTwoFistDist = 0;
+    if (!rightFist || !leftFist) { if (ffGestureActive === 'two-fist-scale') ffUndoSaved = false; }
+
+    // ========================
+    // F2. THREE FINGERS EACH HAND + PUSH = SCULPT/SQUISH
+    // Push forward (hands move toward screen / Y increases) = push surface in
+    // Pull back (hands move away / Y decreases) = pull surface out
+    // ========================
+    if (rightThree && leftThree && selectedObject) {
+        // Average palm center of both hands for raycast target
+        const rMid = rightHand[9], lMid = leftHand[9];
+        const cx = ((1 - rMid.x) + (1 - lMid.x)) / 2 * innerWidth;
+        const cy = (rMid.y + lMid.y) / 2 * innerHeight;
+
+        // Track vertical motion (Y in MediaPipe space) for push/pull strength
+        const rWristY = rightHand[0].y;
+        const lWristY = leftHand[0].y;
+
+        if (ffThreeFingerLastY[0] === 0) {
+            ffThreeFingerLastY[0] = rWristY;
+            ffThreeFingerLastY[1] = lWristY;
+        }
+        const dyR = rWristY - ffThreeFingerLastY[0];
+        const dyL = lWristY - ffThreeFingerLastY[1];
+        const avgDy = (dyR + dyL) / 2; // positive = pushing forward, negative = pulling back
+        ffThreeFingerLastY[0] = rWristY;
+        ffThreeFingerLastY[1] = lWristY;
+
+        // Raycast from center of both hands to selected mesh
+        const ndc = new THREE.Vector2(
+            (cx / innerWidth) * 2 - 1,
+            -(cy / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObject(selectedObject.mesh);
+        if (hits.length && Math.abs(avgDy) > 0.002) {
+            if (!ffThreeFingerUndoSaved) { saveUndo(); ffThreeFingerUndoSaved = true; }
+            const hitNorm = getHitNormal(hits[0]).clone().transformDirection(selectedObject.mesh.matrixWorld).normalize();
+            const strength = -avgDy * 4.0; // push in = negative extrude, pull out = positive
+            const prevMesh = mesh;
+            mesh = selectedObject.mesh;
+            extrudeAt(hits[0].point, hitNorm, strength * 0.01);
+            mesh = prevMesh;
+            highlightFacesAt(hits[0].point, hitNorm);
+            const action = avgDy > 0 ? 'Pushing in' : 'Pulling out';
+            setCommandStatus(`🖐🖐 ${action} — sculpting ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+        } else if (!hits.length) {
+            setCommandStatus('🖐🖐 3 fingers — aim at shape surface to sculpt');
+        }
+        ffGestureActive = 'three-finger-sculpt';
+        return;
+    }
+    if (!rightThree || !leftThree) {
+        ffThreeFingerLastY = [0, 0];
+        if (ffGestureActive === 'three-finger-sculpt') {
+            ffThreeFingerUndoSaved = false;
+            hideHighlight();
+        }
+    }
+
+    // ========================
+    // G. POINT = HIGHLIGHT faces
+    // ========================
+    if (rightPointing) {
+        const tip = rightHand[8];
+        const sx = (1 - tip.x) * innerWidth;
+        const sy = tip.y * innerHeight;
+        const ndc = new THREE.Vector2(
+            (sx / innerWidth) * 2 - 1,
+            -(sy / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        if (selectedObject) {
+            const hits = raycaster.intersectObject(selectedObject.mesh);
+            if (hits.length) {
+                const hitNorm = hits[0].face?.normal
+                    ? hits[0].face.normal.clone().transformDirection(selectedObject.mesh.matrixWorld).normalize()
+                    : new THREE.Vector3(0, 0, 1);
+                highlightFacesAt(hits[0].point, hitNorm);
+                setCommandStatus('☝️ Pointing at face — cupped hand to sculpt');
+            } else {
+                hideHighlight();
+            }
+        } else {
+            // Try to find any object under pointer
+            const allMeshes = sceneObjects.map(e => e.mesh);
+            const hits = raycaster.intersectObjects(allMeshes, true);
+            if (hits.length) {
+                const hitNorm = hits[0].face?.normal
+                    ? hits[0].face.normal.clone().transformDirection(hits[0].object.matrixWorld).normalize()
+                    : new THREE.Vector3(0, 0, 1);
+                highlightFacesAt(hits[0].point, hitNorm);
+            } else {
+                hideHighlight();
+            }
+        }
+        ffGestureActive = 'pointing';
+        return;
+    } else {
+        if (ffGestureActive === 'pointing') hideHighlight();
+    }
+
+    // ========================
+    // H. OPEN PALM = ROTATE selected or orbit camera
+    // ========================
+    if (rightOpen && !leftOpen) {
+        const dx = ffSmX - ffPrevX;
+        const dy = ffSmY - ffPrevY;
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            if (selectedObject) {
+                if (ffGestureActive !== 'rotating') { saveUndo(); }
+                const angleY = dx * 0.005;
+                const angleX = dy * 0.005;
+                const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                selectedObject.mesh.quaternion.premultiply(qX.clone().multiply(qY));
+                updateSelectedOutline();
+                setCommandStatus(`🖐 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                showOrbitRef();
+                doCameraOrbit(dx, dy);
+                setCommandStatus('🖐 Orbiting camera — pinch a shape to grab it');
+            }
+        }
+        ffGestureActive = 'rotating';
+        return;
+    }
+
+    // Idle state
+    if (sceneObjects.length > 0 && !selectedObject) {
+        setCommandStatus('Point at a shape, then pinch to grab');
+    } else if (selectedObject) {
+        setCommandStatus(`${SHAPE_LABELS[selectedObject.name] || selectedObject.name} selected — pinch to grab, palm to rotate`);
+    }
+    ffGestureActive = 'idle';
+}
+
+// Wire up freeform shape buttons
+document.querySelectorAll('.ff-shape-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const shape = btn.dataset.ffshape;
+        if (!shape) return;
+        if (currentAppMode !== 'freeform') applyAppMode('freeform');
+        const entry = addSceneObject(shape, new THREE.Vector3(0, 0, 0), 0.5);
+        selectObject(entry);
+        setCommandStatus(`Added ${SHAPE_LABELS[shape] || shape} — grab it with pinch!`);
+    });
+});
+
+// Freeform color wheel
+const ffColorWheel = document.getElementById('ff-color-wheel');
+if (ffColorWheel) {
+    ffColorWheel.addEventListener('input', () => {
+        if (selectedObject && selectedObject.mesh.material) {
+            selectedObject.mesh.material.color.set(ffColorWheel.value);
+        }
+    });
+}
+
+function processGestureModes(leftHand, rightHand) {
+    // --- SKETCH MODE: index finger drawing ---
+    if (currentAppMode === 'sketch' && rightHand) {
+        const indexTip = rightHand[8];
+        const screenX = (1 - indexTip.x) * innerWidth;
+        const screenY = indexTip.y * innerHeight;
+        updateGesturePointer(rightHand);
+        const indexPIP = rightHand[6];
+        const middleTip = rightHand[12];
+        const middlePIP = rightHand[10];
+        const indexExtended = indexTip.y < indexPIP.y;
+        const middleCurled = middleTip.y >= middlePIP.y;
+        if (indexExtended && middleCurled) {
+            if (!isSketchDrawing) { saveSketchUndo(); isSketchDrawing = true; lastSketchPt = null; }
+            sketchStroke(screenX, screenY);
+        } else if (isSketchDrawing) {
+            isSketchDrawing = false; lastSketchPt = null;
+        }
+        return;
+    }
+
+    // --- FREEFORM MODE: dedicated gesture engine ---
+    if (currentAppMode === 'freeform') {
+        processFreeformGestures(leftHand, rightHand);
+        return;
+    }
+
+    if (currentAppMode !== 'model') return;
+
+    // --- Helper: count extended fingers ---
+    function countExt(hand) {
+        if (!hand) return 0;
+        let n = 0;
+        if (hand[8].y < hand[6].y) n++;   // index
+        if (hand[12].y < hand[10].y) n++;  // middle
+        if (hand[16].y < hand[14].y) n++;  // ring
+        if (hand[20].y < hand[18].y) n++;  // pinky
+        const thumbDist = Math.hypot(hand[4].x - hand[17].x, hand[4].y - hand[17].y);
+        if (thumbDist > 0.1) n++; // thumb
+        return n;
+    }
+
+    function isFistGesture(hand) {
+        if (!hand) return false;
+        return countExt(hand) <= 1; // 0 or 1 finger = fist
+    }
+
+    function isOpenPalm(hand) {
+        if (!hand) return false;
+        return countExt(hand) >= 5;
+    }
+
+    if (!rightHand) {
+        hideGesturePointer();
+        hideOrbitRef();
+        gmFistFrames = 0;
+        gmWasFist = false;
+        gmGestureActive = 'none';
+        return;
+    }
+
+    // --- Always update pointer at index fingertip ---
+    const indexTip = rightHand[8];
+    const pointerX = (1 - indexTip.x) * innerWidth;
+    const pointerY = indexTip.y * innerHeight;
+
+    const palm = rightHand[9];
+    const screenX = (1 - palm.x) * innerWidth;
+    const screenY = palm.y * innerHeight;
+    const prevX = gmRightSmX;
+    const prevY = gmRightSmY;
+    // Smoother pointer tracking (0.6 new, 0.4 old for stability)
+    gmRightSmX = gmRightSmX * 0.4 + screenX * 0.6;
+    gmRightSmY = gmRightSmY * 0.4 + screenY * 0.6;
+
+    // Snapshot pointer position before pinch shifts it — used for pinch selection
+    const rightPinchCheck = isPinch(rightHand);
+    if (!rightPinchCheck) {
+        gmPrePinchPointerX = gpSmoothX;
+        gmPrePinchPointerY = gpSmoothY;
+    }
+
+    updateGesturePointer(rightHand);
+
+    // --- Hover highlight: raycast from pointer to show which object would be selected ---
+    if (!rightPinchCheck && sceneObjects.length > 0) {
+        const hoverNdc = new THREE.Vector2(
+            (gpSmoothX / innerWidth) * 2 - 1,
+            -(gpSmoothY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(hoverNdc, camera);
+        const hoverMeshes = [];
+        for (const entry of sceneObjects) {
+            hoverMeshes.push(entry.mesh);
+            entry.mesh.traverse(child => { if (child.isMesh) hoverMeshes.push(child); });
+        }
+        const hoverHits = raycaster.intersectObjects(hoverMeshes, false);
+        if (hoverHits.length > 0) {
+            let hitObj = hoverHits[0].object;
+            let entry = null;
+            while (hitObj) {
+                entry = sceneObjects.find(o => o.mesh === hitObj);
+                if (entry) break;
+                hitObj = hitObj.parent;
+            }
+            setHoveredObject(entry || null);
+        } else {
+            clearHoveredObject();
+        }
+    } else if (rightPinchCheck) {
+        clearHoveredObject();
+    }
+
+    // --- Classify current hand gesture ---
+    const rightExt = countExt(rightHand);
+    const rightFist = isFistGesture(rightHand);
+    const rightOpen = isOpenPalm(rightHand);
+    const rightPinch = isPinch(rightHand);
+    const leftOpen = leftHand ? isOpenPalm(leftHand) : false;
+    const leftPinch = leftHand ? isPinch(leftHand) : false;
+
+    // Debug status when idle
+    const pinchDist2D = Math.hypot(rightHand[4].x - rightHand[8].x, rightHand[4].y - rightHand[8].y);
+    const debugFingers = `${rightExt}f P:${pinchDist2D.toFixed(2)}/${PINCH_THRESHOLD}${rightFist ? ' FIST' : ''}${rightOpen ? ' OPEN' : ''}${rightPinch ? ' 👌PINCH' : ''}`;
+
+    // --- Track left hand smoothed position ---
+    if (leftHand) {
+        const lPalm = leftHand[9];
+        const lScreenX = (1 - lPalm.x) * innerWidth;
+        const lScreenY = lPalm.y * innerHeight;
+        gmLeftPrevX = gmLeftSmX;
+        gmLeftPrevY = gmLeftSmY;
+        gmLeftSmX = gmLeftSmX * 0.4 + lScreenX * 0.6;
+        gmLeftSmY = gmLeftSmY * 0.4 + lScreenY * 0.6;
+    }
+
+    // --- LEFT HAND OPEN PALM + SELECTED OBJECT = ROTATE SELECTED (priority over two-palm zoom) ---
+    if (leftOpen && selectedObject) {
+        const dx = gmLeftSmX - gmLeftPrevX;
+        const dy = gmLeftSmY - gmLeftPrevY;
+        if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
+            if (gmGestureActive !== 'left-rotating') { saveUndo(); }
+            const angleY = dx * 0.005;
+            const angleX = dy * 0.005;
+            const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+            const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+            const combinedQ = qX.clone().multiply(qY);
+            selectedObject.mesh.quaternion.premultiply(combinedQ);
+            updateSelectedOutline();
+            setCommandStatus(`🖐 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name} (left hand)`);
+            gmGestureActive = 'left-rotating';
+        }
+        // If right hand is also pinching, let that continue too (don't return)
+        if (!rightPinch) {
+            gmRightLastX = gmRightSmX;
+            gmRightLastY = gmRightSmY;
+            // Don't return — allow right hand gestures to also apply
+        }
+    }
+
+    // --- TWO OPEN PALMS (no selection) = ZOOM ---
+    if (rightOpen && leftOpen && !selectedObject) {
+        const rPalm = rightHand[9];
+        const lPalm = leftHand[9];
+        const palmDist = Math.hypot(rPalm.x - lPalm.x, rPalm.y - lPalm.y);
+        if (!gmTwoPalmLastDist) {
+            gmTwoPalmLastDist = palmDist;
+        } else {
+            const delta = palmDist - gmTwoPalmLastDist;
+            if (Math.abs(delta) > 0.003) {
+                doCameraZoom(-delta * 300);
+            }
+            gmTwoPalmLastDist = palmDist;
+        }
+        setCommandStatus('Zoom — spread/close hands');
+        gmGestureActive = 'zoom';
+        gmRightLastX = gmRightSmX;
+        gmRightLastY = gmRightSmY;
+        return;
+    }
+    gmTwoPalmLastDist = 0;
+
+    // --- TWO PEACE SIGNS (✌️✌️) = MIRROR ---
+    if (leftHand && rightHand) {
+        function isPeaceSign(hand) {
+            const palm = hand[0];
+            const indexExt = Math.hypot(hand[8].x - palm.x, hand[8].y - palm.y) > 0.12;
+            const middleExt = Math.hypot(hand[12].x - palm.x, hand[12].y - palm.y) > 0.12;
+            const ringCurled = Math.hypot(hand[16].x - palm.x, hand[16].y - palm.y) < 0.13;
+            const pinkyCurled = Math.hypot(hand[20].x - palm.x, hand[20].y - palm.y) < 0.13;
+            // Thumb can be semi-extended during peace sign — don't require it curled
+            return indexExt && middleExt && ringCurled && pinkyCurled;
+        }
+        if (isPeaceSign(rightHand) && isPeaceSign(leftHand)) {
+            if (!gestureState._twoPeaceStart) {
+                gestureState._twoPeaceStart = performance.now();
+            } else if (performance.now() - gestureState._twoPeaceStart > 400) {
+                // Auto-select if nothing selected
+                if (!selectedObject && sceneObjects.length > 0) selectObject(sceneObjects[0]);
+                saveUndo();
+                const wx = rightHand[0].x;
+                const axis = wx < 0.4 ? 'x' : wx > 0.6 ? 'z' : 'y';
+                mirrorMesh(axis);
+                setCommandStatus(`✌️✌️ Mirrored (${axis.toUpperCase()})!`);
+                gestureState._twoPeaceStart = null;
+                gestureLockedUntil = performance.now() + 1500;
+                gmGestureActive = 'mirror';
+                return;
+            }
+            setCommandStatus('✌️✌️ Hold peace signs to mirror...');
+            gmGestureActive = 'mirror';
+            return;
+        } else {
+            gestureState._twoPeaceStart = null;
+        }
+    }
+
+    // --- ROCK N ROLL (🤘) = ARRAY ---
+    {
+        function isRockNRoll(hand) {
+            const palm = hand[0];
+            const indexExt = Math.hypot(hand[8].x - palm.x, hand[8].y - palm.y) > 0.12;
+            const pinkyExt = Math.hypot(hand[20].x - palm.x, hand[20].y - palm.y) > 0.12;
+            const middleCurled = Math.hypot(hand[12].x - palm.x, hand[12].y - palm.y) < 0.13;
+            const ringCurled = Math.hypot(hand[16].x - palm.x, hand[16].y - palm.y) < 0.13;
+            // Thumb can be in any position for rock n roll
+            return indexExt && pinkyExt && middleCurled && ringCurled;
+        }
+        if (isRockNRoll(rightHand)) {
+            if (!gestureState._rockStart) {
+                gestureState._rockStart = performance.now();
+            } else if (performance.now() - gestureState._rockStart > 400) {
+                // Auto-select if nothing selected
+                if (!selectedObject && sceneObjects.length > 0) selectObject(sceneObjects[0]);
+                saveUndo();
+                const dir = new THREE.Vector3(1, 0, 0);
+                arrayMesh(2, dir);
+                setCommandStatus('🤘 Array duplicated!');
+                gestureState._rockStart = null;
+                gestureLockedUntil = performance.now() + 1500;
+                gmGestureActive = 'array';
+                return;
+            }
+            setCommandStatus('🤘 Hold rock n roll to array...');
+            gmGestureActive = 'array';
+            return;
+        } else {
+            gestureState._rockStart = null;
+        }
+    }
+
+    // --- TWO PINCH DRAG = EXTRUDE along dominant axis (priority over single pinch) ---
+    if (rightPinch && leftPinch && selectedObject) {
+        const rp = { x: (rightHand[4].x + rightHand[8].x) / 2, y: (rightHand[4].y + rightHand[8].y) / 2 };
+        const lp = { x: (leftHand[4].x + leftHand[8].x) / 2, y: (leftHand[4].y + leftHand[8].y) / 2 };
+        const distX = Math.abs(rp.x - lp.x);
+        const distY = Math.abs(rp.y - lp.y);
+        const totalDist = Math.hypot(rp.x - lp.x, rp.y - lp.y);
+
+        if (!gmTwoPinchLastDist) {
+            gmTwoPinchLastDist = totalDist;
+            gmTwoPinchLastX = distX;
+            gmTwoPinchLastY = distY;
+        } else {
+            const deltaTotal = totalDist - gmTwoPinchLastDist;
+            const deltaX = distX - gmTwoPinchLastX;
+            const deltaY = distY - gmTwoPinchLastY;
+
+            if (Math.abs(deltaTotal) > 0.003) {
+                if (!gmTwoPinchUndoSaved) { saveUndo(); gmTwoPinchUndoSaved = true; }
+                const s = selectedObject.mesh.scale;
+                const absDx = Math.abs(deltaX);
+                const absDy = Math.abs(deltaY);
+                const scaleAmt = deltaTotal * 3;
+
+                if (absDx > absDy * 1.5) {
+                    s.x = Math.max(0.05, s.x + scaleAmt);
+                    setCommandStatus(`👌👌 Extruding X: ${s.x.toFixed(2)}`);
+                } else if (absDy > absDx * 1.5) {
+                    s.y = Math.max(0.05, s.y + scaleAmt);
+                    setCommandStatus(`👌👌 Extruding Y: ${s.y.toFixed(2)}`);
+                } else {
+                    const factor = 1 + deltaTotal * 3;
+                    s.x *= Math.max(0.5, Math.min(2.0, factor));
+                    s.y *= Math.max(0.5, Math.min(2.0, factor));
+                    s.z *= Math.max(0.5, Math.min(2.0, factor));
+                    setCommandStatus(`👌👌 Scaling all: ${s.x.toFixed(2)}`);
+                }
+                updateSelectedOutline();
+            }
+            gmTwoPinchLastDist = totalDist;
+            gmTwoPinchLastX = distX;
+            gmTwoPinchLastY = distY;
+        }
+        gmGestureActive = 'two-pinch-extrude';
+        gmRightLastX = gmRightSmX;
+        gmRightLastY = gmRightSmY;
+        return;
+    }
+    if (!rightPinch || !leftPinch) {
+        gmTwoPinchLastDist = 0;
+        gmTwoPinchLastX = 0;
+        gmTwoPinchLastY = 0;
+        gmTwoPinchUndoSaved = false;
+    }
+
+    // --- PINCH = SELECT, then ROTATE (drag) + SCALE (depth) ---
+    // Skip if we're already dragging an anchor handle
+    if (rightPinch && !draggingAnchor) {
+        if (!gmWasFist) {
+            gmFistFrames++;
+            if (gmFistFrames >= 1) {
+                gmWasFist = true;
+                gmPinchStartX = gmRightSmX;
+                gmPinchStartY = gmRightSmY;
+                gmPinchUndoSaved = false;
+                // Measure hand size at pinch start for depth scaling
+                gmPinchStartHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+                // Select object under pointer (use pre-pinch position before fingertip shifted)
+                const ndc = new THREE.Vector2(
+                    (gmPrePinchPointerX / innerWidth) * 2 - 1,
+                    -(gmPrePinchPointerY / innerHeight) * 2 + 1
+                );
+                raycaster.setFromCamera(ndc, camera);
+                const allMeshes = [];
+                for (const entry of sceneObjects) {
+                    allMeshes.push(entry.mesh);
+                    entry.mesh.traverse(child => { if (child.isMesh) allMeshes.push(child); });
+                }
+                const hits = raycaster.intersectObjects(allMeshes, false);
+                if (hits.length > 0) {
+                    let hitObj = hits[0].object;
+                    let entry = null;
+                    while (hitObj) {
+                        entry = sceneObjects.find(o => o.mesh === hitObj);
+                        if (entry) break;
+                        hitObj = hitObj.parent;
+                    }
+                    if (entry) {
+                        clearHoveredObject();
+                        selectObject(entry);
+                        setCommandStatus(`👌 Selected: ${SHAPE_LABELS[entry.name] || entry.name} — drag to rotate, depth to scale`);
+                    }
+                } else if (hoveredObject) {
+                    // If raycast missed but we had a hovered object, select that instead
+                    clearHoveredObject();
+                    selectObject(hoveredObject);
+                    setCommandStatus(`👌 Selected: ${SHAPE_LABELS[hoveredObject.name] || hoveredObject.name} — drag to rotate, depth to scale`);
+                } else if (selectedObject) {
+                    deselectObject();
+                    setCommandStatus('👌 Deselected');
+                }
+            }
+        } else if (selectedObject) {
+            // Pinch held + selected: ROTATE by dragging, SCALE by depth (hand size change)
+            if (!gmPinchUndoSaved) { saveUndo(); gmPinchUndoSaved = true; }
+
+            // --- ROTATE: lateral drag rotates the selected object ---
+            const dx = gmRightSmX - prevX;
+            const dy = gmRightSmY - prevY;
+            if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
+                const angleY = dx * 0.005;
+                const angleX = dy * 0.005;
+                const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                const combinedQ = qX.clone().multiply(qY);
+                selectedObject.mesh.quaternion.premultiply(combinedQ);
+                updateSelectedOutline();
+                setCommandStatus(`👌 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                gmGestureActive = 'rotating';
+            }
+
+            // --- SCALE: hand size change (forward/back depth) scales the object ---
+            const currentHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+            const scaleDelta = currentHandScale - gmPinchStartHandScale;
+            if (Math.abs(scaleDelta) > 0.005) {
+                const scaleFactor = 1 + scaleDelta * 2;
+                selectedObject.mesh.scale.multiplyScalar(Math.max(0.5, Math.min(2.0, scaleFactor)));
+                gmPinchStartHandScale = currentHandScale; // reset baseline for continuous scaling
+                updateSelectedOutline();
+                setCommandStatus(`👌 Scaling ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                gmGestureActive = 'scaling';
+            }
+        }
+        gmGestureActive = gmGestureActive || 'selecting';
+        gmRightLastX = gmRightSmX;
+        gmRightLastY = gmRightSmY;
+        return;
+    }
+    if (!rightPinch) { gmFistFrames = 0; gmWasFist = false; gmPinchUndoSaved = false; }
+
+    // --- OPEN PALM (right hand) = ROTATE selected object or orbit scene ---
+    if (rightOpen && !leftOpen) {
+        const dx = gmRightSmX - prevX;
+        const dy = gmRightSmY - prevY;
+
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            if (selectedObject) {
+                // Rotate only the selected object
+                if (gmGestureActive !== 'rotating') { saveUndo(); }
+                const angleY = dx * 0.005;
+                const angleX = dy * 0.005;
+                const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                const combinedQ = qX.clone().multiply(qY);
+                selectedObject.mesh.quaternion.premultiply(combinedQ);
+                updateSelectedOutline();
+                setCommandStatus(`🖐 Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                showOrbitRef();
+                const angleY = dx * 0.005;
+                const angleX = dy * 0.005;
+                const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+                if (sceneObjects.length > 0) {
+                    if (gmGestureActive !== 'rotating') { saveUndo(); }
+                    const pivot = new THREE.Vector3();
+                    for (const entry of sceneObjects) pivot.add(entry.mesh.position);
+                    pivot.divideScalar(sceneObjects.length);
+                    const combinedQ = qX.clone().multiply(qY);
+                    for (const entry of sceneObjects) {
+                        const pos = entry.mesh.position.clone().sub(pivot);
+                        pos.applyQuaternion(combinedQ);
+                        entry.mesh.position.copy(pos.add(pivot));
+                        entry.mesh.quaternion.premultiply(combinedQ);
+                    }
+                    updateSelectedOutline();
+                } else {
+                    doCameraOrbit(dx, dy);
+                }
+            }
+        }
+        gmGestureActive = 'rotating';
+        gmRightLastX = gmRightSmX;
+        gmRightLastY = gmRightSmY;
+        return;
+    }
+
+    // Release anchor when gesture ends
+    if (draggingAnchor && !rightFist && !rightPinch) {
+        draggingAnchor = null;
+        anchorDragAxis = null;
+    }
+
+    // --- IDLE: just pointer ---
+    hideOrbitRef();
+    gmGestureActive = 'none';
+    setCommandStatus(`${debugFingers} | Pinch=select Palm=move Fist=extrude`);
+
+    gmRightLastX = gmRightSmX;
+    gmRightLastY = gmRightSmY;
+}
+
+function simulateMouseEvent(type, x, y) {
+    const el = document.elementFromPoint(x, y);
+    if (el) {
+        el.dispatchEvent(new MouseEvent(type, {
+            clientX: x, clientY: y, bubbles: true, cancelable: true
+        }));
+    }
+}
+
+// Count extended fingers on a hand
+function countFingers(hand) {
+    let count = 0;
+
+    // Thumb: tip (4) far from wrist (0) compared to when fist is closed
+    // Measure distance from thumb tip to index finger base (5)
+    // When fist: thumb wraps close to index base. When extended: far away.
+    const thumbTip = hand[4];
+    const pinkyMCP = hand[17];
+    const thumbDist = Math.hypot(thumbTip.x - pinkyMCP.x, thumbTip.y - pinkyMCP.y);
+    // Thumb is extended if it's far from pinky base
+    if (thumbDist > 0.1) count++;
+
+    // Index, Middle, Ring, Pinky: tip higher than PIP = extended
+    const fingerPairs = [
+        [hand[8], hand[6]],   // index: tip vs PIP
+        [hand[12], hand[10]], // middle: tip vs PIP
+        [hand[16], hand[14]], // ring: tip vs PIP
+        [hand[20], hand[18]], // pinky: tip vs PIP
+    ];
+    for (const [tip, pip] of fingerPairs) {
+        if (tip.y < pip.y) count++;
+    }
+    return count;
+}
+
+function clearDebugCanvas() {
+    const canvas = document.getElementById('debug-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawDebugHands(landmarks, handedness) {
+    const canvas = document.getElementById('debug-canvas');
+    if (!canvas) return;
+    canvas.width = innerWidth;
+    canvas.height = innerHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const CONNECTIONS = [
+        [0,1],[1,2],[2,3],[3,4],
+        [0,5],[5,6],[6,7],[7,8],
+        [0,9],[9,10],[10,11],[11,12],
+        [0,13],[13,14],[14,15],[15,16],
+        [0,17],[17,18],[18,19],[19,20],
+        [5,9],[9,13],[13,17],
+    ];
+    const TIPS = new Set([4,8,12,16,20]);
+    const handColors = ['#ff4488', '#44aaff'];
+    const handLabels = ['Left', 'Right'];
+
+    for (let h = 0; h < landmarks.length; h++) {
+        const hand = landmarks[h];
+        const color = handColors[h % 2];
+
+        // Determine handedness label
+        let label = `Hand ${h + 1}`;
+        if (handedness[h] && handedness[h][0]) {
+            // MediaPipe mirrors: "Left" in camera = user's right hand
+            const mpLabel = handedness[h][0].categoryName;
+            label = mpLabel === 'Left' ? '🫲 Right Hand' : '🫱 Left Hand';
+        }
+
+        const pt = (idx) => ({
+            x: (1 - hand[idx].x) * canvas.width,
+            y: hand[idx].y * canvas.height,
+        });
+
+        // Draw skeleton
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 0.8;
+        for (const [a, b] of CONNECTIONS) {
+            const pa = pt(a), pb = pt(b);
+            ctx.beginPath();
+            ctx.moveTo(pa.x, pa.y);
+            ctx.lineTo(pb.x, pb.y);
+            ctx.stroke();
+        }
+
+        // Draw joints
+        ctx.globalAlpha = 1.0;
+        for (let i = 0; i < 21; i++) {
+            const p = pt(i);
+            if (TIPS.has(i)) {
+                ctx.fillStyle = '#ffffff';
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            } else if (i === 0) {
+                ctx.fillStyle = color;
+                ctx.fillRect(p.x - 5, p.y - 5, 10, 10);
+            } else {
+                ctx.fillStyle = color;
+                ctx.globalAlpha = 0.6;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        // Count fingers
+        const fingers = countFingers(hand);
+
+        // Draw hand label + finger count + position-based role
+        const w = pt(0);
+        const wristX = hand[0].x.toFixed(2);
+        const role = hand[0].x > 0.5 ? 'LEFT' : 'RIGHT';
+        ctx.font = 'bold 14px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = 3;
+        const infoText = `${role} (x:${wristX}) · ${fingers}f`;
+        ctx.strokeText(infoText, w.x - 40, w.y + 25);
+        ctx.fillText(infoText, w.x - 40, w.y + 25);
+
+        // Big finger count number near hand center
+        const center = pt(9);
+        ctx.font = 'bold 36px monospace';
+        ctx.fillStyle = color;
+        ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+        ctx.lineWidth = 4;
+        ctx.strokeText(fingers.toString(), center.x - 12, center.y - 20);
+        ctx.fillText(fingers.toString(), center.x - 12, center.y - 20);
+    }
+
+    // Summary text at top
+    ctx.font = 'bold 16px monospace';
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth = 3;
+    const summary = `Hands detected: ${landmarks.length}`;
+    ctx.strokeText(summary, 20, 100);
+    ctx.fillText(summary, 20, 100);
 }
 
 // ============================================================
@@ -2810,14 +4440,15 @@ function updateGesturePointer(hand) {
         gesturePointerEl.style.opacity = '1';
     }
 
-    const indexTip = hand[8]; // index fingertip
+    const indexTip = hand[8]; // index fingertip = pointer
     // Convert MediaPipe coords (0-1, mirrored) to screen coords
     const screenX = (1 - indexTip.x) * innerWidth;
     const screenY = indexTip.y * innerHeight;
 
     // Smooth pointer position
-    gpSmoothX = gpSmoothX * 0.5 + screenX * 0.5;
-    gpSmoothY = gpSmoothY * 0.5 + screenY * 0.5;
+    // Smooth pointer with slight lag for stability
+    gpSmoothX = gpSmoothX * 0.35 + screenX * 0.65;
+    gpSmoothY = gpSmoothY * 0.35 + screenY * 0.65;
 
     // Show and position pointer
     if (!gpVisible) {
@@ -3081,6 +4712,86 @@ function hideOrbitRef() {
     orbitRefTimeout = setTimeout(() => { orbitRefEl.style.display = 'none'; }, 200);
 }
 
+// ---- Shared camera orbit / pan / zoom functions ----
+
+// Compute orbit pivot: selected object center, or center of largest object
+function getOrbitPivot() {
+    if (selectedObject) {
+        return selectedObject.mesh.position.clone();
+    }
+    if (sceneObjects.length > 0) {
+        // Find the biggest object by bounding box volume
+        let biggest = sceneObjects[0];
+        let biggestSize = 0;
+        for (const entry of sceneObjects) {
+            const box = new THREE.Box3().setFromObject(entry.mesh);
+            const size = box.getSize(new THREE.Vector3());
+            const vol = size.x * size.y * size.z;
+            if (vol > biggestSize) {
+                biggestSize = vol;
+                biggest = entry;
+            }
+        }
+        return biggest.mesh.position.clone();
+    }
+    return orbitTarget.clone();
+}
+
+function doCameraOrbit(dx, dy) {
+    showOrbitRef();
+    const pivot = getOrbitPivot();
+    const angleY = dx * 0.005;
+    const angleX = dy * 0.005;
+    // Rotate camera position around the pivot
+    const offset = camera.position.clone().sub(pivot);
+    // Horizontal: rotate around world Y
+    const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+    offset.applyQuaternion(qY);
+    // Vertical: rotate around camera's right axis
+    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+    offset.applyQuaternion(qX);
+    camera.position.copy(pivot).add(offset);
+    orbitTarget.copy(pivot);
+    camera.lookAt(orbitTarget);
+}
+
+function doCameraPan(dx, dy) {
+    showOrbitRef();
+    const panSpeed = 0.005 * camera.position.distanceTo(orbitTarget);
+    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+    const panOffset = camRight.multiplyScalar(-dx * panSpeed).add(camUp.multiplyScalar(dy * panSpeed));
+    camera.position.add(panOffset);
+    orbitTarget.add(panOffset);
+    camera.lookAt(orbitTarget);
+}
+
+function doCameraZoom(dy) {
+    // Distance-based zoom — move camera along view direction
+    const dir = camera.getWorldDirection(new THREE.Vector3());
+    const dist = camera.position.distanceTo(orbitTarget);
+    const step = dy * 0.003 * dist; // proportional to distance
+    camera.position.addScaledVector(dir, -step);
+    // Clamp minimum/maximum distance
+    const newDist = camera.position.distanceTo(orbitTarget);
+    if (newDist < 0.5) {
+        camera.position.copy(orbitTarget).addScaledVector(dir, -0.5);
+    } else if (newDist > 100) {
+        camera.position.copy(orbitTarget).addScaledVector(dir, -100);
+    }
+}
+
+function resetCamera() {
+    camera.position.set(0, 0, 6);
+    camera.fov = 45;
+    camera.updateProjectionMatrix();
+    orbitTarget.set(0, 0, 0);
+    camera.lookAt(orbitTarget);
+    gmSpinVelX = 0;
+    gmSpinVelY = 0;
+}
+
 renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
 
 renderer.domElement.addEventListener('mousedown', e => {
@@ -3107,6 +4818,21 @@ renderer.domElement.addEventListener('mousedown', e => {
         );
         raycaster.setFromCamera(ndc, camera);
 
+        // Check anchor handles first (for scale/extrude)
+        if (selectedAnchors.length > 0 && e.button === 0) {
+            const anchorHits = raycaster.intersectObjects(selectedAnchors);
+            if (anchorHits.length > 0) {
+                const hit = anchorHits[0].object;
+                draggingAnchor = hit;
+                anchorDragAxis = hit.userData.axis;
+                anchorDragSign = hit.userData.sign;
+                if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+                isDragging = true;
+                setCommandStatus(`Scaling ${anchorDragAxis.toUpperCase()} axis...`);
+                return;
+            }
+        }
+
         // Check scene objects first (separate added shapes)
         if (sceneObjects.length > 0 && e.button === 0) {
             const objMeshes = sceneObjects.map(o => o.mesh);
@@ -3121,12 +4847,21 @@ renderer.domElement.addEventListener('mousedown', e => {
                     hitObj = hitObj.parent;
                 }
                 if (entry) {
-                    selectObject(entry);
-                    draggingObject = entry;
+                    if (entry !== selectedObject) {
+                        // Clicked a different object — select it
+                        selectObject(entry);
+                    }
+                    // Don't set draggingObject on left click — let left drag rotate
+                    // Right-click drag will move via the right-drag handler
                     isDragging = true;
                     return;
                 }
             }
+        }
+
+        // Right-click + selected object = set up for move drag
+        if (e.button === 2 && selectedObject) {
+            draggingObject = selectedObject;
         }
 
         // Click empty space = mark for deselect (only on mouseup if no drag)
@@ -3179,6 +4914,41 @@ renderer.domElement.addEventListener('mousedown', e => {
         raycaster.setFromCamera(ndc, camera);
         const hits = raycaster.intersectObject(mesh);
         if (hits.length) abstractHitPoint = hits[0].point.clone();
+    } else if (currentAppMode === 'freeform') {
+        // Freeform mouse: click to select, right-click to set up move
+        const ndc = new THREE.Vector2(
+            (e.clientX / innerWidth) * 2 - 1,
+            -(e.clientY / innerHeight) * 2 + 1
+        );
+        raycaster.setFromCamera(ndc, camera);
+        if (sceneObjects.length > 0 && e.button === 0) {
+            const objMeshes = sceneObjects.map(o => o.mesh);
+            const objHits = raycaster.intersectObjects(objMeshes, true);
+            if (objHits.length > 0) {
+                let hitObj = objHits[0].object;
+                let entry = null;
+                while (hitObj) {
+                    entry = sceneObjects.find(o => o.mesh === hitObj);
+                    if (entry) break;
+                    hitObj = hitObj.parent;
+                }
+                if (entry && entry !== selectedObject) {
+                    selectObject(entry);
+                }
+                isDragging = true;
+                return;
+            }
+        }
+        if (e.button === 2 && selectedObject) {
+            draggingObject = selectedObject;
+        }
+        if (selectedObject && e.button === 0) {
+            const objMeshes = sceneObjects.map(o => o.mesh);
+            const objHits = raycaster.intersectObjects(objMeshes, true);
+            if (objHits.length === 0) {
+                pendingDeselect = true;
+            }
+        }
     }
 });
 
@@ -3231,6 +5001,24 @@ renderer.domElement.addEventListener('mousemove', e => {
     }
 
     if (!isDragging) return;
+
+    // Anchor handle drag = scale along axis
+    if (draggingAnchor && selectedObject) {
+        const dx = e.clientX - lastMouse.x;
+        const dy = e.clientY - lastMouse.y;
+        lastMouse = { x: e.clientX, y: e.clientY };
+        dragMoved = true;
+        const scaleSpeed = 0.005;
+        // Use dominant mouse direction for scaling
+        const delta = (Math.abs(dx) > Math.abs(dy) ? dx : -dy) * scaleSpeed * anchorDragSign;
+        const s = selectedObject.mesh.scale;
+        if (anchorDragAxis === 'x') s.x = Math.max(0.05, s.x + delta);
+        else if (anchorDragAxis === 'y') s.y = Math.max(0.05, s.y + delta);
+        else if (anchorDragAxis === 'z') s.z = Math.max(0.05, s.z + delta);
+        updateSelectedOutline();
+        setCommandStatus(`Scale ${anchorDragAxis.toUpperCase()}: ${s[anchorDragAxis].toFixed(2)}`);
+        return;
+    }
 
     // Drag selected scene object — Shift+drag = scale along axis, normal drag = move
     if (draggingObject) {
@@ -3291,57 +5079,79 @@ renderer.domElement.addEventListener('mousemove', e => {
 
     if (currentAppMode === 'model') {
         if (mouseBtn === 2) {
-            // Right drag → pan
+            // Right drag → pan camera (or move selected object)
             if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
-            showOrbitRef();
-            mesh.position.x += dx * 0.01;
-            mesh.position.y -= dy * 0.01;
-        } else if (mouseBtn === 0) {
-            // Left drag → orbit
-            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
-            showOrbitRef();
             if (selectedObject) {
-                selectedObject.mesh.rotation.y += dx * 0.01;
-                selectedObject.mesh.rotation.x += dy * 0.01;
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                const moveSpeed = 0.005 * camera.position.distanceTo(selectedObject.mesh.position);
+                selectedObject.mesh.position.add(camRight.clone().multiplyScalar(dx * moveSpeed));
+                selectedObject.mesh.position.add(camUp.clone().multiplyScalar(-dy * moveSpeed));
+                updateSelectedOutline();
+                setCommandStatus(`Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                doCameraPan(dx, dy);
+            }
+        } else if (mouseBtn === 0) {
+            // Left drag → rotate selected object, or rotate all objects
+            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            showOrbitRef();
+            const angleY = dx * 0.005;
+            const angleX = dy * 0.005;
+            const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+            const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+
+            if (selectedObject) {
+                selectedObject.mesh.quaternion.premultiply(qY).premultiply(qX);
                 updateSelectedOutline();
                 setCommandStatus(`Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
             } else if (sceneObjects.length > 0) {
-                // Orbit around the center of all objects
-                // Calculate pivot in local mesh space
                 const pivot = new THREE.Vector3();
-                for (const entry of sceneObjects) {
-                    pivot.add(entry.mesh.position);
-                }
+                for (const entry of sceneObjects) pivot.add(entry.mesh.position);
                 pivot.divideScalar(sceneObjects.length);
-
-                // Rotate each object's position around the pivot
-                const angleY = dx * 0.01;
-                const angleX = dy * 0.01;
+                const combinedQ = qX.clone().multiply(qY);
                 for (const entry of sceneObjects) {
                     const pos = entry.mesh.position.clone().sub(pivot);
-                    // Rotate around Y axis
-                    const cosY = Math.cos(angleY), sinY = Math.sin(angleY);
-                    const newX = pos.x * cosY + pos.z * sinY;
-                    const newZ = -pos.x * sinY + pos.z * cosY;
-                    pos.x = newX;
-                    pos.z = newZ;
-                    // Rotate around X axis
-                    const cosX = Math.cos(angleX), sinX = Math.sin(angleX);
-                    const newY = pos.y * cosX - pos.z * sinX;
-                    const newZ2 = pos.y * sinX + pos.z * cosX;
-                    pos.y = newY;
-                    pos.z = newZ2;
+                    pos.applyQuaternion(combinedQ);
                     entry.mesh.position.copy(pos.add(pivot));
-                }
-                // Also rotate each object itself so it faces correctly
-                for (const entry of sceneObjects) {
-                    entry.mesh.rotation.y += angleY;
-                    entry.mesh.rotation.x += angleX;
+                    entry.mesh.quaternion.premultiply(combinedQ);
                 }
                 updateSelectedOutline();
             } else {
-                mesh.rotation.y += dx * 0.01;
-                mesh.rotation.x += dy * 0.01;
+                doCameraOrbit(dx, dy);
+            }
+        }
+    } else if (currentAppMode === 'freeform') {
+        if (mouseBtn === 2) {
+            // Right drag → move selected object or pan camera
+            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            if (selectedObject) {
+                const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                const moveSpeed = 0.005 * camera.position.distanceTo(selectedObject.mesh.position);
+                selectedObject.mesh.position.add(camRight.clone().multiplyScalar(dx * moveSpeed));
+                selectedObject.mesh.position.add(camUp.clone().multiplyScalar(-dy * moveSpeed));
+                updateSelectedOutline();
+                setCommandStatus(`Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                doCameraPan(dx, dy);
+            }
+        } else if (mouseBtn === 0) {
+            // Left drag → rotate selected or orbit camera
+            if (!mouseUndoArmed) { saveUndo(); mouseUndoArmed = true; }
+            showOrbitRef();
+            const angleY = dx * 0.005;
+            const angleX = dy * 0.005;
+            const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angleY);
+            const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const qX = new THREE.Quaternion().setFromAxisAngle(camRight, -angleX);
+            if (selectedObject) {
+                selectedObject.mesh.quaternion.premultiply(qY).premultiply(qX);
+                updateSelectedOutline();
+                setCommandStatus(`Rotating ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            } else {
+                doCameraOrbit(dx, dy);
             }
         }
     } else if (currentAppMode === 'abstract') {
@@ -3378,6 +5188,8 @@ renderer.domElement.addEventListener('mouseup', () => {
     }
     pendingDeselect = false;
     draggingObject = null;
+    draggingAnchor = null;
+    anchorDragAxis = null;
     dragMoved = false;
     isDragging = false;
     hideOrbitRef();
@@ -3417,29 +5229,19 @@ renderer.domElement.addEventListener('wheel', e => {
         setCommandStatus(`Add Shape size: ${addShapeScale.toFixed(2)}`);
         return;
     }
-    // Scroll to resize selected object (uniform)
-    if (selectedObject && currentAppMode === 'model') {
-        e.preventDefault();
-        const scaleFactor = 1 - e.deltaY * 0.002;
-        const s = selectedObject.mesh.scale;
-        s.x = Math.max(0.05, Math.min(5.0, s.x * scaleFactor));
-        s.y = Math.max(0.05, Math.min(5.0, s.y * scaleFactor));
-        s.z = Math.max(0.05, Math.min(5.0, s.z * scaleFactor));
-        updateSelectedOutline();
-        setCommandStatus(`Size: ${s.x.toFixed(2)} × ${s.y.toFixed(2)} × ${s.z.toFixed(2)}`);
-        return;
-    }
+    // Always zoom camera with scroll wheel
     if (currentAppMode === 'abstract') {
         mesh.scale.multiplyScalar(1 - e.deltaY * 0.001);
     } else {
-        camera.position.z += e.deltaY * 0.005;
-        camera.position.z = Math.max(2, Math.min(20, camera.position.z));
+        e.preventDefault();
+        doCameraZoom(e.deltaY * 0.5);
     }
 }, { passive: false });
 const sketchCanvas = document.getElementById('sketch-canvas');
 if (sketchCanvas) {
     sketchCanvas.addEventListener('mousedown', e => {
         if (currentAppMode !== 'sketch') return;
+        saveSketchUndo();
         isSketchDrawing = true;
         lastSketchPt = null;
         sketchStroke(e.clientX, e.clientY);
@@ -3455,6 +5257,7 @@ if (sketchCanvas) {
     sketchCanvas.addEventListener('touchstart', e => {
         if (currentAppMode !== 'sketch') return;
         e.preventDefault();
+        saveSketchUndo();
         isSketchDrawing = true; lastSketchPt = null;
         sketchStroke(e.touches[0].clientX, e.touches[0].clientY);
     }, { passive: false });
@@ -3544,6 +5347,7 @@ document.querySelectorAll('[data-quick-command]').forEach(btn => {
         } else if (cmd === 'reset') {
             saveUndo();
             setShape(currentShape);
+            resetCamera();
         }
     });
 });
@@ -3554,6 +5358,51 @@ document.getElementById('undo-btn')?.addEventListener('click', undo);
 // STL Export
 document.getElementById('export-stl-btn')?.addEventListener('click', exportSTL);
 document.getElementById('merge-all-btn')?.addEventListener('click', mergeAllObjects);
+document.getElementById('select-all-btn')?.addEventListener('click', selectAllObjects);
+document.getElementById('ff-select-all-btn')?.addEventListener('click', selectAllObjects);
+// New project — clears canvas, asks to save first if unsaved
+function newModelProject() {
+    if (sceneObjects.length > 0) {
+        const save = confirm('Save current work before creating a new project?');
+        if (save) saveProject();
+    }
+    // Clear all scene objects
+    for (const entry of [...sceneObjects]) {
+        removeSceneObject(entry);
+    }
+    deselectObject();
+    // Reset main mesh to empty
+    if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+    const emptyGeo = new THREE.BufferGeometry();
+    emptyGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+    mesh = new THREE.Mesh(emptyGeo, material);
+    scene.add(mesh);
+    mesh.position.set(0, 0, 0);
+    mesh.rotation.set(0, 0, 0);
+    mesh.scale.set(1, 1, 1);
+    currentProjectId = null;
+    resetCamera();
+    setCommandStatus('New project — canvas cleared');
+}
+
+function newSketchProject() {
+    const canvas = document.getElementById('sketch-canvas');
+    const hasContent = canvas && canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data.some((v, i) => i % 4 === 3 ? false : v !== 255);
+    if (hasContent) {
+        const save = confirm('Save current sketch before creating a new one?');
+        if (save) saveSketchProject();
+    }
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    currentProjectId = null;
+    setCommandStatus('New sketch — canvas cleared');
+}
+
+document.getElementById('new-project-btn')?.addEventListener('click', newModelProject);
+document.getElementById('sketch-new-btn')?.addEventListener('click', newSketchProject);
 document.getElementById('save-btn')?.addEventListener('click', saveProject);
 document.getElementById('save-as-btn')?.addEventListener('click', saveAsProject);
 
@@ -3561,21 +5410,135 @@ document.getElementById('save-as-btn')?.addEventListener('click', saveAsProject)
 let clipboardObject = null; // { name, position, scale, rotation }
 
 // Keyboard shortcuts
+// Release keyboard gesture mode on keyup
+let gmSpaceDownTime = 0; // timestamp when spacebar was pressed
+
+window.addEventListener('keyup', e => {
+    if (gmKeyboardMode >= 0 && e.key >= '1' && e.key <= '4') {
+        gmReleaseMouseIfHeld();
+        gmKeyboardMode = -1;
+        hideOrbitRef();
+    }
+    // Spacebar release
+    if (e.key === ' ' && gmMouseDown && gmMouseButton === 0) {
+        const holdDuration = performance.now() - gmSpaceDownTime;
+        if (holdDuration < 250) {
+            // Short press = single click at cursor position
+            gmReleaseMouseIfHeld();
+            hideOrbitRef();
+            // Fire a click at the cursor position
+            const canvas = renderer.domElement;
+            canvas.dispatchEvent(new MouseEvent('mousedown', {
+                clientX: gmRightSmX, clientY: gmRightSmY,
+                button: 0, buttons: 1, bubbles: true, cancelable: true
+            }));
+            canvas.dispatchEvent(new MouseEvent('mouseup', {
+                clientX: gmRightSmX, clientY: gmRightSmY,
+                button: 0, buttons: 0, bubbles: true, cancelable: true
+            }));
+            setCommandStatus('Click!');
+        } else {
+            // Long press = was dragging, just release
+            gmReleaseMouseIfHeld();
+            hideOrbitRef();
+        }
+    }
+});
+
 window.addEventListener('keydown', e => {
     if (e.target.closest('input, textarea')) return;
 
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+    // Spacebar = left click (works anytime, not just free move)
+    if (e.key === ' ') {
         e.preventDefault();
-        undo();
+        if (!gmMouseDown || gmMouseButton !== 0) {
+            gmReleaseMouseIfHeld();
+            gmMouseDown = true;
+            gmMouseButton = 0;
+            gmSpaceDownTime = performance.now();
+            setCommandStatus('Space: Left click hold');
+        }
+        return;
     }
 
-    // Ctrl+S = Save, Ctrl+Shift+S = Save As
+    // 1-5 keys = activate gesture mode directly (no left hand needed)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key >= '1' && e.key <= '4') {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx >= 0 && idx < gmSlots.length) {
+            const mode = gmSlots[idx];
+            gmActiveSlot = idx;
+            if (mode === 'free') {
+                // Toggle free move — no cooldown for keyboard
+                gmFreezeCursor = !gmFreezeCursor;
+                gmKeyboardMode = -1;
+                setCommandStatus(gmFreezeCursor ? 'Free move ON' : 'Free move OFF');
+            } else if (mode === 'leftclick') {
+                gmKeyboardMode = 0;
+                gmReleaseMouseIfHeld();
+                gmMouseDown = true;
+                gmMouseButton = 0;
+                setCommandStatus('Keyboard: Left click hold');
+            } else if (mode === 'rightclick') {
+                gmKeyboardMode = 2;
+                gmReleaseMouseIfHeld();
+                gmMouseDown = true;
+                gmMouseButton = 2;
+                setCommandStatus('Keyboard: Right click hold');
+            } else if (mode === 'zoom') {
+                gmKeyboardMode = 3;
+                gmReleaseMouseIfHeld();
+                gmMouseDown = true;
+                gmMouseButton = 3;
+                setCommandStatus('Keyboard: Zoom');
+            } else {
+                gmKeyboardMode = -1;
+                setCommandStatus(`Mode: ${mode}`);
+            }
+            updateGMSlotUI();
+        }
+        return;
+    }
+
+    // 0 key = reset camera view
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key === '0') {
+        resetCamera();
+        setCommandStatus('Camera reset');
+        return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        if (currentAppMode === 'sketch') {
+            undoSketch();
+        } else {
+            undo();
+        }
+    }
+
+    // Ctrl+A = Select all objects
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        if (currentAppMode === 'model' || currentAppMode === 'freeform') {
+            selectAllObjects();
+        }
+    }
+
+    // Ctrl+N = New project
+    if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault();
+        if (currentAppMode === 'sketch') newSketchProject();
+        else newModelProject();
+    }
+
+    // Ctrl+S = Save, Ctrl+Shift+S = Save As (works in both model and sketch)
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        if (e.shiftKey) {
-            saveAsProject();
+        if (currentAppMode === 'sketch') {
+            if (e.shiftKey) saveSketchAsProject();
+            else saveSketchProject();
         } else {
-            saveProject();
+            if (e.shiftKey) saveAsProject();
+            else saveProject();
         }
     }
 
@@ -3759,6 +5722,45 @@ document.getElementById('export-confirm')?.addEventListener('click', () => {
     document.getElementById('sketch-export-panel').style.display = 'none';
 });
 
+// Apply sketch as texture to 3D model
+document.getElementById('sketch-apply-btn')?.addEventListener('click', () => {
+    applySketchAsTexture();
+});
+
+function applySketchAsTexture() {
+    const canvas = document.getElementById('sketch-canvas');
+    if (!canvas) { setCommandStatus('No sketch canvas'); return; }
+
+    // Create texture from sketch canvas
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+
+    // Switch to 3D model mode
+    applyAppMode('model');
+
+    // Apply to selected object or all objects
+    if (selectedObject) {
+        selectedObject.mesh.material = selectedObject.mesh.material.clone();
+        selectedObject.mesh.material.map = texture;
+        selectedObject.mesh.material.needsUpdate = true;
+        setCommandStatus(`Applied sketch to ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+    } else if (sceneObjects.length > 0) {
+        for (const entry of sceneObjects) {
+            entry.mesh.material = entry.mesh.material.clone();
+            entry.mesh.material.map = texture.clone();
+            entry.mesh.material.needsUpdate = true;
+        }
+        setCommandStatus('Applied sketch to all objects');
+    } else {
+        // Apply to main mesh
+        material.map = texture;
+        material.needsUpdate = true;
+        setCommandStatus('Applied sketch as texture');
+    }
+}
+
 // Check mesh button
 document.querySelector('[data-tool="check"]')?.addEventListener('click', checkMesh);
 
@@ -3794,6 +5796,11 @@ if (handsBtn) {
             if (handTrackingActive) {
                 handsBtn.textContent = '✋ Hands Off';
                 handsBtn.classList.add('active');
+                // Auto-enable debug to show hand skeleton
+                isDebug = true;
+                document.getElementById('debug-overlay').style.display = 'block';
+                const db = document.getElementById('debug-toggle-btn');
+                if (db) { db.textContent = '🛠 Debug On'; db.classList.add('active'); }
             } else {
                 handsBtn.textContent = '✋ Hands On';
                 showError('Camera unavailable — check permissions');
@@ -3803,6 +5810,12 @@ if (handsBtn) {
             stopCamera();
             handsBtn.textContent = '✋ Hands On';
             handsBtn.classList.remove('active');
+            // Turn off debug
+            isDebug = false;
+            document.getElementById('debug-overlay').style.display = 'none';
+            const db = document.getElementById('debug-toggle-btn');
+            if (db) { db.textContent = '🛠 Debug Off'; db.classList.remove('active'); }
+            clearDebugCanvas();
             setCommandStatus('Hand tracking stopped');
         }
     });
@@ -4147,6 +6160,10 @@ function animate() {
     // Hand detection
     detectHands();
 
+    // Spin momentum disabled — was causing objects to fly off screen
+    gmSpinVelX = 0;
+    gmSpinVelY = 0;
+
     // Apply smooth rotation momentum (runs every frame for fluid motion)
     if (mesh && (Math.abs(smoothRotVelX) > 0.0001 || Math.abs(smoothRotVelY) > 0.0001)) {
         mesh.rotation.y += smoothRotVelY;
@@ -4178,6 +6195,7 @@ function animate() {
 }
 
 animate();
+resetCamera();
 setCommandStatus('Ready');
 
 // Start in gallery view — hide model elements
@@ -4235,7 +6253,8 @@ function saveProject() {
     if (currentProjectId) {
         const projects = getGalleryProjects();
         const idx = projects.findIndex(p => p.id === currentProjectId);
-        if (idx !== -1) {
+        // Only overwrite if the loaded project is a 3D model
+        if (idx !== -1 && projects[idx].type !== 'sketch') {
             const project = buildProjectData(projects[idx].name);
             project.id = currentProjectId;
             projects[idx] = project;
@@ -4288,17 +6307,26 @@ function saveSketchProject() {
     if (currentProjectId) {
         const projects = getGalleryProjects();
         const idx = projects.findIndex(p => p.id === currentProjectId);
-        if (idx !== -1) {
+        // Only overwrite if the loaded project is a sketch
+        if (idx !== -1 && projects[idx].type === 'sketch') {
             const canvas = document.getElementById('sketch-canvas');
             const thumbnail = canvas ? canvas.toDataURL('image/jpeg', 0.6) : '';
             projects[idx].thumbnail = thumbnail;
             projects[idx].sketchData = thumbnail;
             projects[idx].date = new Date().toLocaleDateString();
-            saveGalleryProjects(projects);
-            setCommandStatus(`Saved "${projects[idx].name}"!`);
+            try {
+                saveGalleryProjects(projects);
+                setCommandStatus(`Saved "${projects[idx].name}"!`);
+            } catch (e) {
+                projects[idx].thumbnail = '';
+                projects[idx].sketchData = '';
+                saveGalleryProjects(projects);
+                setCommandStatus(`Saved "${projects[idx].name}" (no image)`);
+            }
             return;
         }
     }
+    // No sketch project loaded — Save As
     saveSketchAsProject();
 }
 
@@ -4383,7 +6411,7 @@ function loadProject(project) {
             obj.position.fromArray(objData.position);
             obj.scale.fromArray(objData.scale);
             if (objData.rotation) obj.rotation.set(objData.rotation[0], objData.rotation[1], objData.rotation[2]);
-            mesh.add(obj);
+            scene.add(obj);  // add to scene directly
             const wire = new THREE.LineSegments(
                 new THREE.EdgesGeometry(geo, 15),
                 new THREE.LineBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.12 })
@@ -4394,8 +6422,29 @@ function loadProject(project) {
     }
 
     currentProjectId = project.id;
-    applyAppMode('model');
-    setCommandStatus(`Loaded "${project.name}"`);
+
+    // Open in the correct mode based on project type
+    if (project.type === 'sketch') {
+        applyAppMode('sketch');
+        // Restore sketch canvas from saved data
+        if (project.sketchData) {
+            const canvas = document.getElementById('sketch-canvas');
+            if (canvas) {
+                const ctx = canvas.getContext('2d');
+                const img = new Image();
+                img.onload = () => {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                };
+                img.src = project.sketchData;
+            }
+        }
+        setCommandStatus(`Loaded sketch "${project.name}"`);
+    } else {
+        applyAppMode('model');
+        resetCamera();
+        setCommandStatus(`Loaded "${project.name}"`);
+    }
 }
 
 function deleteProject(id) {
@@ -4793,8 +6842,8 @@ async function processBobaCommand(input) {
     }
 }
 
-// Initialize AI on load
-initAI();
+// Don't auto-prompt for AI key — only connect when user first sends a message
+// or types 'connect'
 
 if (sendBtn && chatInput) {
     sendBtn.addEventListener('click', () => {
