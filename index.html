@@ -3,9 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>The Whimsical Clay Studio</title>
+  <title>Hand-Gestural 3D Modeling Studio</title>
   <link rel="stylesheet" href="css/style.css" />
-  <!-- Import map for Three.js and MediaPipe -->
   <script type="importmap">
     {
       "imports": {
@@ -15,150 +14,322 @@
     }
   </script>
 </head>
-<body data-workshop="default">
-  <!-- Workshop Mode Top Bar -->
+<body data-appmode="gallery">
+  <!-- ============ TOP BAR ============ -->
   <div id="workshop-bar">
     <div id="workshop-bar-inner">
-      <button class="ws-btn active" data-workshop="default">🎨 3D Studio</button>
-      <button class="ws-btn" data-workshop="metal">⚙️ Metal Workshop</button>
-      <button class="ws-btn" data-workshop="wood">🪵 Wood Workshop</button>
-      <button class="ws-btn" data-workshop="crochet">🧶 Crochet Workshop</button>
+      <button class="ws-btn active" data-appmode="gallery">🖼️ Gallery</button>
+      <button class="ws-btn" data-appmode="model">🧰 3D Model</button>
+      <button class="ws-btn" data-appmode="sketch">✏️ Sketch</button>
     </div>
     <div id="workshop-bar-actions">
-      <button id="scan-btn" title="Scan a real object with your camera">📷 Scan</button>
-      <button id="hands-toggle-btn" title="Toggle hand tracking">✋ Hands On</button>
+      <!-- 3D Model toolbar actions -->
+      <span id="model-actions">
+        <!-- Texture selector -->
+        <select id="texture-select" title="Surface texture">
+          <option value="matte">Matte</option>
+          <option value="glossy">Glossy</option>
+          <option value="metallic">Metallic</option>
+          <option value="wireframe">Wireframe</option>
+          <option value="clay" selected>Clay</option>
+          <option value="glass">Glass</option>
+        </select>
+        <!-- Color wheel -->
+        <input type="color" id="model-color-wheel" value="#a8c3e6" title="Object color">
+        <!-- Gradient picker -->
+        <button id="gradient-btn" title="Gradient picker">🌈 Gradient</button>
+      </span>
+
+      <!-- Abstract toolbar actions (hidden by default) -->
+      <!-- Sketch mode tools (hidden by default) -->
+      <span id="sketch-actions" style="display:none;">
+        <button class="draw-tool-btn active" data-drawtool="pencil" title="Pencil">✏️ Pencil</button>
+        <button class="draw-tool-btn" data-drawtool="pen" title="Pen">🖊️ Pen</button>
+        <button class="draw-tool-btn" data-drawtool="marker" title="Marker">🖍️ Marker</button>
+        <button class="draw-tool-btn" data-drawtool="crayon" title="Crayon">🖍 Crayon</button>
+        <button class="draw-tool-btn" data-drawtool="pastel" title="Pastel">🎨 Pastel</button>
+        <button class="draw-tool-btn" data-drawtool="acrylic" title="Acrylic">🖌️ Acrylic</button>
+        <button class="draw-tool-btn" data-drawtool="eraser" title="Eraser">🧹 Eraser</button>
+        <input type="color" id="sketch-color-wheel" value="#333333" title="Pen color">
+        <button id="sketch-save-btn" title="Save sketch (Ctrl+S)">💾 Save</button>
+        <button id="sketch-save-as-btn" title="Save sketch as new">📄 Save As</button>
+        <button id="sketch-export-btn" title="Export sketch as SVG">📦 Export SVG</button>
+      </span>
+
       <button id="debug-toggle-btn" title="Toggle Debug Mode">🛠 Debug Off</button>
-      <button id="music-toggle-btn" title="Toggle Background Music">🔇 Music Off</button>
-      <audio id="bg-music" loop src="bg-music.mp3"></audio>
     </div>
   </div>
 
-  <!-- Splice-style Modeling Toolbar -->
+  <!-- ============ 3D MODEL TOOLBAR ============ -->
   <div id="splice-toolbar-wrap">
     <div id="splice-toolbar" role="toolbar" aria-label="Modeling Toolbar">
-      <button class="splice-icon-btn" id="splice-add-btn" title="Add current shape" aria-label="Add shape">＋</button>
-      <button class="splice-icon-btn" id="splice-duplicate-btn" title="Duplicate last placed shape" aria-label="Duplicate last shape">⧉</button>
-      <span class="splice-divider" aria-hidden="true"></span>
-      <button class="splice-icon-btn" data-quick-command="reset" title="Reset object" aria-label="Reset">✧</button>
-      <button class="splice-icon-btn" data-quick-command="wireframe" title="Toggle wireframe" aria-label="Wireframe">◻</button>
-
-      <div class="splice-shape-picker">
-        <button id="splice-shape-trigger" class="splice-icon-btn splice-shape-trigger" title="Shape menu" aria-haspopup="menu" aria-expanded="false" aria-controls="splice-shape-menu">
-          ⬡
-          <span id="splice-shape-label">Sphere</span>
-          <span class="splice-caret">▾</span>
-        </button>
-        <div id="splice-shape-menu" role="menu" aria-label="Shape list">
-          <button class="splice-shape-item" role="menuitem" data-shape="cube">⬡ Cube</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="roundedcube">▣ Rounded Cube</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="sphere">◉ Sphere</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="cylinder">⬢ Cylinder</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="beveledcylinder">◍ Beveled Cylinder</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="torus">◎ Torus</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="helix">⟲ Helix</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="cone">△ Cone</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="pyramid">◇ Pyramid</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="icosahedron">⬟ Icosahedron</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="dodecahedron">⬢ Dodecahedron</button>
-          <button class="splice-shape-item" role="menuitem" data-shape="torusknot">⟠ Torus Knot</button>
-        </div>
+      <!-- Add Shape tool (first) -->
+      <button class="splice-icon-btn tool-btn" id="add-shape-btn" data-tool="addshape" title="Add shape">＋ Add</button>
+      <div id="add-shape-picker" style="display:none;">
+        <button class="add-shape-option" data-addshape="sphere">◉ Sphere</button>
+        <button class="add-shape-option" data-addshape="cube">⬡ Cube</button>
+        <button class="add-shape-option" data-addshape="cylinder">⬢ Cylinder</button>
+        <button class="add-shape-option" data-addshape="cone">△ Cone</button>
+        <button class="add-shape-option" data-addshape="torus">◎ Torus</button>
+        <button class="add-shape-option" data-addshape="pyramid">◇ Pyramid</button>
+        <button class="add-shape-option" data-addshape="icosahedron">⬟ Icosa</button>
+        <button class="add-shape-option" data-addshape="dodecahedron">⬢ Dodeca</button>
+        <button class="add-shape-option" data-addshape="torusknot">⟠ Torus Knot</button>
+        <button class="add-shape-option" data-addshape="helix">⟲ Helix</button>
+        <button class="add-shape-option" data-addshape="apple">🍎 Apple</button>
+        <button class="add-shape-option" data-addshape="pear">🍐 Pear</button>
+        <button class="add-shape-option" data-addshape="banana">🍌 Banana</button>
+        <button class="add-shape-option" data-addshape="strawberry">🍓 Strawberry</button>
+        <button class="add-shape-option" data-addshape="berry">🫐 Berry</button>
+        <button class="add-shape-option" data-addshape="mushroom">🍄 Mushroom</button>
+        <button class="add-shape-option" data-addshape="heart">❤️ Heart</button>
+        <button class="add-shape-option" data-addshape="star">⭐ Star</button>
+        <button class="add-shape-option" data-addshape="clover">🍀 Clover</button>
       </div>
 
       <span class="splice-divider" aria-hidden="true"></span>
 
-      <button class="splice-mode-btn active" data-mode="select" title="Select / Navigate mode" aria-label="Select mode">↖</button>
-      <button class="splice-mode-btn" data-mode="sculpt" title="Sculpt mode" aria-label="Sculpt mode">✋</button>
-      <button class="splice-mode-btn" data-mode="form" title="Form mode" aria-label="Form mode">✍</button>
-      <button class="splice-mode-btn" data-mode="detail" title="Detail mode" aria-label="Detail mode">◌</button>
-      <button class="splice-mode-btn" data-mode="freeze" title="Freeze mode" aria-label="Freeze mode">✊</button>
-      <button class="splice-mode-btn" data-mode="add" title="Add mode" aria-label="Add mode">▷</button>
+      <!-- Transform tools -->
+      <button class="splice-icon-btn tool-btn" data-tool="mirror" title="Mirror">🪞 Mirror</button>
+      <button class="splice-icon-btn tool-btn" data-tool="array" title="Array">⊞ Array</button>
+
+      <span class="splice-divider" aria-hidden="true"></span>
+
+      <!-- Pattern Wrap -->
+      <button class="splice-icon-btn" id="pattern-wrap-btn" title="Pattern wrap: duplicate shape around object">⊛ Pattern</button>
+      <div id="pattern-wrap-panel" style="display:none;">
+        <label>Shape</label>
+        <select id="pattern-shape">
+          <option value="sphere">Sphere</option>
+          <option value="cube">Cube</option>
+          <option value="cone">Cone</option>
+          <option value="torus">Torus</option>
+          <option value="star">Star</option>
+          <option value="heart">Heart</option>
+          <option value="berry">Berry</option>
+        </select>
+        <label>Direction</label>
+        <select id="pattern-mode">
+          <option value="ring">Ring (horizontal)</option>
+          <option value="vertical">Vertical</option>
+          <option value="all">All around</option>
+        </select>
+        <label>Count: <span id="pattern-count-val">8</span></label>
+        <input type="range" id="pattern-count" min="3" max="30" value="8">
+        <label>Size: <span id="pattern-scale-val">0.2</span></label>
+        <input type="range" id="pattern-scale" min="5" max="80" value="20">
+        <button id="pattern-apply">Apply</button>
+        <button id="pattern-close">Cancel</button>
+      </div>
+
+      <span class="splice-divider" aria-hidden="true"></span>
+
+      <!-- Quick actions -->
+      <button class="splice-icon-btn" data-quick-command="wireframe" title="Toggle wireframe">◻</button>
+      <button class="splice-icon-btn" data-quick-command="reset" title="Reset object">✧</button>
+      <button class="splice-icon-btn" id="undo-btn" title="Undo (Ctrl+Z)">↩</button>
+      <button class="splice-icon-btn" id="merge-all-btn" title="Merge all objects into one mesh">🔗 Merge</button>
+      <button class="splice-icon-btn" id="save-btn" title="Save project (Ctrl+S)">💾 Save</button>
+      <button class="splice-icon-btn" id="save-as-btn" title="Save as new project">📄 Save As</button>
+      <button class="splice-icon-btn" id="export-stl-btn" title="Export STL">📦 STL</button>
+      <button class="splice-icon-btn" id="tune-toggle-btn" title="Tuning panel">⚙️ Tune</button>
     </div>
-    <div id="mode-hint">Mode: Select · gesture adaptive</div>
+    <div id="mode-hint">Ready · gesture adaptive</div>
     <div id="command-status" aria-live="polite">Command ready.</div>
   </div>
 
-  <!-- Ghibli Background Elements -->
+  <!-- ============ GRADIENT PICKER PANEL ============ -->
+  <div id="gradient-panel" style="display:none;">
+    <h3>Gradient</h3>
+    <label>Type</label>
+    <select id="gradient-type">
+      <option value="linear">Linear</option>
+      <option value="radial">Radial</option>
+      <option value="angular">Angular</option>
+    </select>
+    <label>Color 1</label><input type="color" id="grad-color1" value="#a8c3e6">
+    <label>Color 2</label><input type="color" id="grad-color2" value="#f5a0c0">
+    <label>Color 3 (optional)</label><input type="color" id="grad-color3" value="#ffdd57">
+    <button id="grad-apply">Apply</button>
+    <button id="grad-close">Close</button>
+  </div>
+
+  <!-- ============ SKETCH EXPORT PANEL ============ -->
+  <div id="sketch-export-panel" style="display:none;">
+    <h3>Export for Laser Cut</h3>
+    <label>Template</label>
+    <select id="export-template">
+      <option value="custom">Custom Shape</option>
+      <option value="card">Card</option>
+      <option value="keychain">Keychain</option>
+      <option value="coaster">Coaster</option>
+      <option value="bookmark">Bookmark</option>
+    </select>
+    <button id="export-confirm">Export SVG</button>
+    <button id="export-cancel">Cancel</button>
+  </div>
+
+  <!-- ============ TUNING PANEL ============ -->
+  <div id="tune-panel" style="display:none;">
+    <h3>⚙️ Tune Parameters</h3>
+    <div class="tune-section">
+      <h4>🎨 Visual</h4>
+      <label>Accent Color <input type="color" id="tune-accent" value="#7b8b6f"></label>
+      <label>Background Tint <input type="color" id="tune-bg" value="#f8eedb"></label>
+      <label>Grid Opacity <span class="tune-val" id="tune-grid-val">0.3</span>
+        <input type="range" id="tune-grid" min="0" max="100" value="30"></label>
+      <label>Shadow Intensity <span class="tune-val" id="tune-shadow-val">0.15</span>
+        <input type="range" id="tune-shadow" min="0" max="100" value="15"></label>
+    </div>
+    <div class="tune-section">
+      <h4>✋ Gestures</h4>
+      <label>Rotation Speed <span class="tune-val" id="tune-rot-val">8.0</span>
+        <input type="range" id="tune-rot" min="10" max="200" value="80"></label>
+      <label>Rotation Momentum <span class="tune-val" id="tune-damp-val">0.92</span>
+        <input type="range" id="tune-damp" min="50" max="99" value="92"></label>
+      <label>Pinch Sensitivity <span class="tune-val" id="tune-pinch-val">5.0</span>
+        <input type="range" id="tune-pinch" min="10" max="150" value="50"></label>
+    </div>
+    <div class="tune-section">
+      <h4>🖌️ Sculpting</h4>
+      <label>Brush Radius <span class="tune-val" id="tune-brush-val">0.6</span>
+        <input type="range" id="tune-brush" min="10" max="150" value="60"></label>
+      <label>Sculpt Strength <span class="tune-val" id="tune-strength-val">0.04</span>
+        <input type="range" id="tune-strength" min="1" max="20" value="4"></label>
+      <label>Max Displacement <span class="tune-val" id="tune-displace-val">0.15</span>
+        <input type="range" id="tune-displace" min="3" max="40" value="15"></label>
+    </div>
+    <div class="tune-section">
+      <h4>🎬 Animation</h4>
+      <label>Blob Breathe Speed <span class="tune-val" id="tune-breathe-val">1.0</span>
+        <input type="range" id="tune-breathe" min="1" max="30" value="10"></label>
+      <label><input type="checkbox" id="tune-reduced-motion"> Reduced Motion</label>
+    </div>
+    <button id="tune-reset" style="margin-top:12px;width:100%;">Reset Defaults</button>
+    <button id="tune-close" style="margin-top:6px;width:100%;">Close</button>
+  </div>
+
+  <!-- ============ LOADING OVERLAY ============ -->
+  <div id="loading-overlay" style="display:none;">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Loading...</div>
+  </div>
+
+  <!-- ============ ERROR TOAST ============ -->
+  <div id="error-toast" style="display:none;"></div>
+
+  <!-- ============ BACKGROUND ELEMENTS ============ -->
   <div id="bg-grid"></div>
   <div id="bg-floor"></div>
   <div id="bg-decor"></div>
 
-  <!-- Container for Three.js -->
+  <!-- ============ ORBIT/PAN REFERENCE POINT ============ -->
+  <div id="orbit-ref" style="display:none;">
+    <div class="orbit-ref-h"></div>
+    <div class="orbit-ref-v"></div>
+    <div class="orbit-ref-dot"></div>
+  </div>
+
+  <!-- ============ GESTURE POINTER ============ -->
+  <div id="gesture-pointer" style="display:none;">
+    <div class="gp-dot"></div>
+    <svg class="gp-ring" viewBox="0 0 40 40">
+      <circle class="gp-ring-bg" cx="20" cy="20" r="18" />
+      <circle class="gp-ring-progress" cx="20" cy="20" r="18" />
+    </svg>
+  </div>
+  <!-- ============ 3D CANVAS ============ -->
   <div id="canvas-container"></div>
 
-  <!-- Debug Overlay Elements -->
-  <div id="debug-overlay" style="display: none; position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 100;">
-    <canvas id="debug-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></canvas>
-    <div id="debug-gesture-text" style="position: absolute; top: 80px; right: 20px; font-family: monospace; font-size: 20px; color: #ff3333; font-weight: bold; background: rgba(255,255,255,0.8); padding: 8px 12px; border-radius: 8px; border: 2px solid #ff3333;">Gesture: None</div>
-    <div id="debug-command-text" style="position: absolute; top: 130px; right: 20px; font-family: monospace; font-size: 16px; color: #2b332b; font-weight: bold; background: rgba(255,255,255,0.85); padding: 8px 12px; border-radius: 8px; border: 2px solid #7b8b6f;">Command: Idle</div>
+  <!-- ============ SKETCH CANVAS ============ -->
+  <canvas id="sketch-canvas" style="display:none;"></canvas>
+
+  <!-- ============ DEBUG OVERLAY ============ -->
+  <div id="debug-overlay" style="display:none; position:absolute; top:0; left:0; width:100vw; height:100vh; pointer-events:none; z-index:100;">
+    <canvas id="debug-canvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas>
+    <div id="debug-gesture-text" style="position:absolute; top:80px; right:20px; font-family:monospace; font-size:20px; color:#ff3333; font-weight:bold; background:rgba(255,255,255,0.8); padding:8px 12px; border-radius:8px; border:2px solid #ff3333;">Gesture: None</div>
+    <div id="debug-command-text" style="position:absolute; top:130px; right:20px; font-family:monospace; font-size:16px; color:#2b332b; font-weight:bold; background:rgba(255,255,255,0.85); padding:8px 12px; border-radius:8px; border:2px solid #7b8b6f;">Command: Idle</div>
   </div>
 
-  <!-- Instruction Guide Panel -->
+  <!-- ============ GESTURE GUIDE PANELS ============ -->
+
+  <!-- 3D Model Guide -->
   <div id="instructions-guide">
-    <h2>🎨 Sculpt Guide</h2>
-    <h3 style="font-size:12px;margin:4px 0;">🖱 Mouse = Sculpt</h3>
+    <h2>🧊 3D Model Guide</h2>
+    <h3 style="font-size:12px;margin:4px 0;">🖱 Mouse Controls</h3>
     <ul>
-      <li><strong>Left drag:</strong> Active tool (pull/push/etc)</li>
-      <li><strong>Right drag:</strong> Opposite tool</li>
-      <li><strong>Shift+drag:</strong> Smooth</li>
-      <li><strong>Empty drag:</strong> Rotate</li>
-      <li><strong>Scroll:</strong> Brush size</li>
+      <li><strong>Hover:</strong> Yellow highlight shows affected faces</li>
+      <li><strong>Drag on face:</strong> Extrude (up=out, down=in)</li>
+      <li><strong>Drag empty:</strong> Orbit camera</li>
+      <li><strong>Right drag:</strong> Pan camera</li>
+      <li><strong>Scroll:</strong> Zoom</li>
+      <li><strong>Shift+drag:</strong> Smooth surface</li>
+      <li><strong>Ctrl+drag:</strong> Soft sculpt</li>
+      <li><strong>Alt+click:</strong> Mirror</li>
       <li><strong>Ctrl+Z:</strong> Undo</li>
     </ul>
-    <h3 style="font-size:12px;margin:8px 0 4px;">✋ Hands = Manipulate</h3>
+    <h3 style="font-size:12px;margin:8px 0 4px;">➕ Add Shape Mode</h3>
     <ul>
-      <li>🤚 <strong>Open Palm:</strong> Rotate</li>
-      <li>🤏 <strong>Pinch:</strong> Move/translate</li>
-      <li>🖐🤲 <strong>Two Palms:</strong> Scale</li>
-      <li>🤏🤏 <strong>Two Pinches Apart:</strong> Split in half</li>
-      <li>✊ <strong>Fist:</strong> Freeze</li>
+      <li><strong>Toolbar ＋ Add</strong> to enter</li>
+      <li>� <strong>Mouse:</strong> Hover to position, scroll to resize, click to place</li>
+      <li>⌨️ <strong>Q/E R/F ←→:</strong> Rotate preview</li>
+      <li><strong>Esc:</strong> Cancel</li>
     </ul>
-    <p class="tip">Sculpt with mouse, manipulate with hands. Export STL for 3D printing!</p>
+    <p class="tip">Shape-preserving: extrude, mirror, split. Export STL for 3D printing!</p>
   </div>
-  
-  <!-- Webcam feed (hidden from UI, used for tracking) -->
+
+  <!-- Sketch Guide -->
+  <div id="sketch-guide" style="display:none;">
+    <h2>✏️ Sketch Guide</h2>
+    <ul>
+      <li>Draw with mouse or touch</li>
+      <li>Select tool texture from toolbar</li>
+      <li>Export → SVG for laser cutting</li>
+    </ul>
+  </div>
+
+  <!-- ============ GALLERY VIEW ============ -->
+  <div id="gallery-view" style="display:none;">
+    <div id="gallery-header">
+      <h2>🖼️ My Projects</h2>
+    </div>
+    <div id="gallery-empty" style="display:none;">
+      <p>No saved projects yet. Go to 3D Model or Sketch, create something, then come back here to save it!</p>
+    </div>
+    <div id="gallery-grid"></div>
+  </div>
+
+  <!-- ============ WEBCAM ============ -->
   <video id="webcam" autoplay playsinline></video>
-  
-  <!-- Cat Companion AI Agent -->
+  <div id="camera-status"></div>
+
+  <!-- ============ CAT COMPANION AI (Boba) ============ -->
   <div id="companion-ui">
     <div id="cat-character" style="cursor: pointer; text-align: center;">
-      <!-- Illustrative Line-Art Cat Style SVG -->
       <svg viewBox="0 0 100 120" width="100" height="120" xmlns="http://www.w3.org/2000/svg">
-        <!-- Body base -->
         <path d="M20,60 L25,10 L45,35 L55,35 L75,10 L80,60 C90,70 95,90 85,115 L15,115 C5,90 10,70 20,60 Z" fill="#ebdfce" stroke="#7b8b6f" stroke-width="2.5" stroke-linejoin="round"/>
-        <!-- Eyes -->
-        <!-- Left Eye (Always Open) -->
         <circle cx="35" cy="55" r="8" fill="#fff" stroke="#7b8b6f" stroke-width="2"/>
         <circle cx="37" cy="55" r="3" fill="#7b8b6f"/>
         <circle cx="38" cy="54" r="1" fill="#fff"/>
-        
-        <!-- Right Eye (Open State) -->
         <g id="right-eye-open">
           <circle cx="65" cy="55" r="8" fill="#fff" stroke="#7b8b6f" stroke-width="2"/>
           <circle cx="63" cy="55" r="3" fill="#7b8b6f"/>
           <circle cx="64" cy="54" r="1" fill="#fff"/>
         </g>
-        <!-- Right Eye (Wink State - Hidden Default) -->
         <path id="right-eye-wink" d="M57,55 Q65,48 73,55" stroke="#7b8b6f" stroke-width="2.5" fill="none" stroke-linecap="round" style="display: none;"/>
-
-        <!-- Snout/Mouth -->
         <path d="M45,70 C48,76 52,76 55,70" stroke="#7b8b6f" stroke-width="2" fill="none" stroke-linecap="round"/>
-        <!-- Whiskers -->
         <path d="M22,65 L5,60 M20,70 L5,70 M22,75 L8,80 M78,65 L95,60 M80,70 L95,70 M78,75 L92,80" stroke="#7b8b6f" stroke-width="1.5" stroke-linecap="round"/>
       </svg>
-      <div id="ai-name-badge" style="font-weight: bold; color: #5a6652; background: rgba(255,255,255,0.85); border: 1px solid #7b8b6f; border-radius: 12px; padding: 2px 8px; margin-top: -10px; font-size: 13px; position: relative; z-index: 10; display: inline-block;">🐾 Boba</div>
+      <div id="ai-name-badge" style="font-weight:bold; color:#5a6652; background:rgba(255,255,255,0.85); border:1px solid #7b8b6f; border-radius:12px; padding:2px 8px; margin-top:-10px; font-size:13px; position:relative; z-index:10; display:inline-block;">🐾 Boba</div>
     </div>
     <div id="chat-interface">
-      <div id="cat-dialogue">Meow~ I'm Boba, ready to refine your design!</div>
-      
-      <!-- Chat History Container (Hidden by default) -->
+      <div id="cat-dialogue">Meow~ I'm Boba, your AI sculpting assistant! Powered by Gemini ✨</div>
       <div id="chat-history-container" style="display: none;">
         <ul id="chat-history"></ul>
       </div>
-
       <div id="chat-controls">
         <button id="toggle-history-btn" title="Toggle Chat History">📋</button>
-        <input type="text" id="chat-input" placeholder="e.g. 'Smooth the corners'..." autocomplete="off">
-        <button id="mic-btn" title="Hold to use voice command">🎤</button>
+        <input type="text" id="chat-input" placeholder="Ask Boba anything..." autocomplete="off">
         <button id="send-btn">➔</button>
       </div>
     </div>
