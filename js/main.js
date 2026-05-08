@@ -3216,12 +3216,16 @@ let ffPinchFrames = 0;       // frames since pinch detected
 let ffPinchActive = false;   // pinch was confirmed
 let ffUndoSaved = false;
 let ffPinchStartHandScale = 0;
+let ffPinchStartX = 0;
+let ffPinchStartY = 0;
 let ffSmX = 0, ffSmY = 0;           // smoothed right palm screen coords
 let ffPrevX = 0, ffPrevY = 0;       // previous frame smoothed coords
 let ffLeftSmX = 0, ffLeftSmY = 0;   // smoothed left palm screen coords
 let ffLeftPrevX = 0, ffLeftPrevY = 0;
 let ffTwoPalmDist = 0;
 let ffTwoPinchDist = 0;
+let ffTwoPinchMidX = 0;
+let ffTwoPinchMidY = 0;
 let ffTwoFistDist = 0;
 let ffThreeFingerLastY = [0, 0]; // per-hand Y tracking for 3-finger push
 let ffThreeFingerUndoSaved = false;
@@ -3398,10 +3402,35 @@ function processFreeformGestures(leftHand, rightHand) {
     }
 
     // ========================
-    // A. FIST = FREEZE
+    // A. FIST = MOVE SELECTED OBJECT
     // ========================
-    if (rightFist && !rightPinch) {
-        setCommandStatus('✊ Frozen — fist held');
+    if (rightFist && !rightPinch && selectedObject) {
+        const dx = ffSmX - ffPrevX;
+        const dy = ffSmY - ffPrevY;
+        const totalDrag = Math.hypot(ffSmX - ffPinchStartX, ffSmY - ffPinchStartY);
+        if (!ffPinchActive) {
+            ffPinchActive = true;
+            ffUndoSaved = false;
+            ffPinchStartX = ffSmX;
+            ffPinchStartY = ffSmY;
+        }
+        if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
+        if (totalDrag > 6 || ffGestureActive === 'moving') {
+            const camRightV = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const camUpV = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+            const moveSpeed = 0.004 * camera.position.distanceTo(selectedObject.mesh.position);
+            selectedObject.mesh.position.add(camRightV.clone().multiplyScalar(dx * moveSpeed));
+            selectedObject.mesh.position.add(camUpV.clone().multiplyScalar(-dy * moveSpeed));
+            updateSelectedOutline();
+            setCommandStatus(`✊ Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            ffGestureActive = 'moving';
+        } else {
+            setCommandStatus(`✊ Hold fist, then move ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+            ffGestureActive = 'fist-hold';
+        }
+        return;
+    } else if (rightFist && !rightPinch) {
+        setCommandStatus('✊ Fist held — select an object first to move it');
         ffGestureActive = 'freeze';
         return;
     }
@@ -3446,30 +3475,50 @@ function processFreeformGestures(leftHand, rightHand) {
     }
 
     // ========================
-    // D. TWO PINCHES + SELECTED = STRETCH/SCALE with both hands
+    // D. TWO PINCHES + SELECTED = MOVE together or SCALE when spread
     // ========================
     if (rightPinch && leftPinch && selectedObject) {
         const rp = { x: (rightHand[4].x + rightHand[8].x) / 2, y: (rightHand[4].y + rightHand[8].y) / 2 };
         const lp = { x: (leftHand[4].x + leftHand[8].x) / 2, y: (leftHand[4].y + leftHand[8].y) / 2 };
+        const midX = (rp.x + lp.x) / 2;
+        const midY = (rp.y + lp.y) / 2;
         const d = Math.hypot(rp.x - lp.x, rp.y - lp.y);
+
         if (ffTwoPinchDist > 0) {
+            const midDx = midX - ffTwoPinchMidX;
+            const midDy = midY - ffTwoPinchMidY;
+            const moveMag = Math.hypot(midDx, midDy);
             const delta = d - ffTwoPinchDist;
-            if (Math.abs(delta) > 0.003) {
+            if (moveMag > 0.003 && Math.abs(delta) < 0.004) {
+                if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
+                const camRightV = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const camUpV = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                const moveSpeed = 0.02 * camera.position.distanceTo(selectedObject.mesh.position);
+                selectedObject.mesh.position.add(camRightV.clone().multiplyScalar(midDx * moveSpeed));
+                selectedObject.mesh.position.add(camUpV.clone().multiplyScalar(-midDy * moveSpeed));
+                updateSelectedOutline();
+                setCommandStatus(`👌👌 Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                ffGestureActive = 'two-pinch-move';
+            } else if (Math.abs(delta) > 0.003) {
                 if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
                 const factor = 1 + delta * 3;
                 selectedObject.mesh.scale.multiplyScalar(Math.max(0.1, Math.min(5.0, factor)));
                 updateSelectedOutline();
                 setCommandStatus(`👌👌 Scaling ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
+                ffGestureActive = 'two-pinch-scale';
             }
         }
         ffTwoPinchDist = d;
-        ffGestureActive = 'two-pinch-scale';
+        ffTwoPinchMidX = midX;
+        ffTwoPinchMidY = midY;
         return;
     }
     ffTwoPinchDist = 0;
+    ffTwoPinchMidX = 0;
+    ffTwoPinchMidY = 0;
 
     // ========================
-    // E. PINCH = GRAB, MOVE, SCALE (depth), or EXTRUDE (anchor drag)
+    // E. PINCH = GRAB / SELECT, SCALE (depth), or EXTRUDE (anchor drag)
     // ========================
     if (rightPinch) {
         if (!ffPinchActive) {
@@ -3479,6 +3528,8 @@ function processFreeformGestures(leftHand, rightHand) {
                 ffUndoSaved = false;
                 ffDraggingAnchor = null;
                 ffPinchStartHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
+                ffPinchStartX = ffSmX;
+                ffPinchStartY = ffSmY;
 
                 // Check if pinching near an anchor handle first (extrude mode)
                 if (selectedObject && selectedAnchors.length > 0) {
@@ -3501,20 +3552,22 @@ function processFreeformGestures(leftHand, rightHand) {
                     clearHoveredObject();
                     selectObject(entry);
                     ffGrabbed = true;
-                    setCommandStatus(`👌 Grabbed ${SHAPE_LABELS[entry.name] || entry.name} — drag to move, push/pull to scale`);
+                    setCommandStatus(`👌 Selected ${SHAPE_LABELS[entry.name] || entry.name} — hold fist, then move to translate`);
                 } else if (hoveredObject) {
                     const hov = hoveredObject;
                     clearHoveredObject();
                     selectObject(hov);
                     ffGrabbed = true;
-                    setCommandStatus(`👌 Grabbed ${SHAPE_LABELS[hov.name] || hov.name} — drag to move, push/pull to scale`);
+                    setCommandStatus(`👌 Selected ${SHAPE_LABELS[hov.name] || hov.name} — hold fist, then move to translate`);
                 } else if (selectedObject) {
                     deselectObject();
                     ffGrabbed = false;
-                    setCommandStatus('👌 Released — pinch on a shape to grab it');
+                    setCommandStatus('👌 Released — pinch on a shape to select it');
                 }
             }
-        } else if (ffDraggingAnchor && selectedObject) {
+        }
+
+        if (ffDraggingAnchor && selectedObject) {
             // --- ANCHOR DRAG: extrude/scale along locked axis ---
             const dx = ffSmX - ffPrevX;
             const dy = ffSmY - ffPrevY;
@@ -3530,22 +3583,8 @@ function processFreeformGestures(leftHand, rightHand) {
             }
             ffGestureActive = 'anchor-extrude';
         } else if (ffGrabbed && selectedObject) {
-            // --- PINCH HELD: MOVE (lat drag) + SCALE (depth) ---
+            // --- PINCH HELD: SCALE (depth) ---
             if (!ffUndoSaved) { saveUndo(); ffUndoSaved = true; }
-
-            // MOVE: lateral drag translates in camera plane
-            const dx = ffSmX - ffPrevX;
-            const dy = ffSmY - ffPrevY;
-            if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
-                const camRightV = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-                const camUpV = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
-                const moveSpeed = 0.004 * camera.position.distanceTo(selectedObject.mesh.position);
-                selectedObject.mesh.position.add(camRightV.clone().multiplyScalar(dx * moveSpeed));
-                selectedObject.mesh.position.add(camUpV.clone().multiplyScalar(-dy * moveSpeed));
-                updateSelectedOutline();
-                setCommandStatus(`👌 Moving ${SHAPE_LABELS[selectedObject.name] || selectedObject.name}`);
-                ffGestureActive = 'moving';
-            }
 
             // SCALE: hand size change (push/pull = depth)
             const currentHandScale = Math.hypot(rightHand[9].x - rightHand[0].x, rightHand[9].y - rightHand[0].y);
