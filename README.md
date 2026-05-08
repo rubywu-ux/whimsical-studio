@@ -1,3 +1,29 @@
+
+# Whimsical Studio
+
+A small portfolio / demo site for Ruby Wu. This repo hosts a hand-gestural 3D modeling studio demo.
+
+**View locally:** open `index.html` in a browser.
+
+**Publish with GitHub Pages (web UI):**
+- Go to your repo Settings → Pages.
+- Under "Build and deployment", select branch `main` and folder `/ (root)`.
+- Save and wait a few minutes for the site to become active.
+
+**Publish with CLI (optional):**
+```
+git add .
+git commit -m "Publish site"
+git push origin main
+```
+
+Framer site snapshot (fetched from https://rubywu.framer.website):
+- Name: Ruby Wu
+- Location: Based in Seattle, WA
+- Role: UX Designer at the University of Washington
+- Note: site requests desktop view for best experience
+
+Contact: rubywu (via repo profile)
 # Whimsical Clay Studio
 
 A browser-based 3D sculpting app with hand gesture control, inspired by Studio Ghibli aesthetics. Built for prototyping 3D-printable objects like cute characters, figurines, and everyday items.
