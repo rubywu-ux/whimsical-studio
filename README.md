@@ -89,6 +89,13 @@ npx serve . -l 8000
 ```
 Open the forwarded port URL in your browser. Allow camera access for hand tracking.
 
+## Deploying to GitHub Pages
+1. In GitHub, open the repository settings and enable Pages from GitHub Actions.
+2. Push to the `main` branch to trigger the deployment workflow in `.github/workflows/pages.yml`.
+3. After the workflow succeeds, open the Pages URL shown in the Actions deployment summary.
+
+If you want a quick local check before pushing, run the same static server command above and verify the site loads correctly.
+
 ## Keyboard Shortcuts
 | Key | Action |
 |-----|--------|
