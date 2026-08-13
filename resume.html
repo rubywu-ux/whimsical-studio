@@ -6,22 +6,121 @@
   <title>Resume</title>
   <link rel="stylesheet" href="css/style.css" />
   <style>
-    body { margin: 24px; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; }
-    .viewer { width:100%; height:80vh; border:1px solid #ddd; }
+    body { margin: 24px; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; color:#222; }
+    .container { max-width:900px; margin:0 auto; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    h1 { margin:0; font-size:28px; }
+    .muted { color:#666; font-size:14px; }
+    section { margin-top:18px; }
     .actions { margin-top:12px; }
     .actions a { margin-right:12px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    ul { margin:6px 0 0 18px; }
   </style>
 </head>
 <body>
-  <h1>Resume</h1>
-  <p>If the PDF doesn't display, use the download link below.</p>
-  <div class="viewer">
-    <iframe src="resume.pdf" title="Resume PDF" width="100%" height="100%"></iframe>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Ruby Wu</h1>
+        <div class="muted">UX Designer · Interaction Design student</div>
+      </div>
+      <div class="muted" style="text-align:right">
+        <div>rubywu.uxd@gmail.com</div>
+        <div><a href="https://github.com/rubywu-ux" target="_blank">github.com/rubywu-ux</a></div>
+      </div>
+    </header>
+    <section id="pdf-view">
+      <h2>Printable PDF</h2>
+      <div style="border:1px solid #ddd; padding:8px;">
+        <iframe src="resume.pdf" title="Resume PDF" width="100%" height="480" style="border:0">
+          Your browser does not support PDFs. You can <a href="resume.pdf">download the PDF</a>.
+        </iframe>
+        <div class="muted" style="margin-top:8px">If the PDF doesn't appear, add <strong>resume.pdf</strong> to the repository root.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Education</h2>
+      <div class="grid">
+        <div>
+          <strong>University of Washington</strong>
+          <div class="muted">BDES: Interaction Design — September 2024 – May 2027<br>Seattle, WA</div>
+        </div>
+        <div>
+          <strong>Seattle Central College</strong>
+          <div class="muted">AA: Direct Transfer — September 2022 – June 2024<br>Seattle, WA</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Experience</h2>
+      <ul>
+        <li>
+          <strong>Seattle Parks &amp; Recreation / Chinatown Community Center</strong> — Graphic Designer &amp; Organizer<br>
+          <span class="muted">February 2023 – December 2025 · Seattle, WA</span>
+        </li>
+        <li>
+          <strong>FUTURE IELTS</strong> — English Teacher<br>
+          <span class="muted">October 2021 – June 2023 · Zhengzhou, China (Remote)</span>
+        </li>
+        <li>
+          <strong>Sweet Dental</strong> — Dental Assistant<br>
+          <span class="muted">December 2021 – March 2022 · San Juan, TX</span>
+        </li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Projects</h2>
+      <ul>
+        <li>
+          <strong>Yubai — Smart IoT Home System</strong> · UX Design &amp; Research (May – July 2026)
+          <ul>
+            <li>Conducted UX research with older adults (60+) to design a culturally grounded smart home ecosystem.</li>
+            <li>Developed personas and multimodal interaction frameworks across displays, voice UI, and tangible controls.</li>
+            <li>Designed accessible interfaces and tangible workflows to balance ambient IoT with user agency.</li>
+          </ul>
+        </li>
+        <li>
+          <strong>UW Food Pantry — Winfo Hackathon</strong> · UX Design &amp; Prototyping (January 24, 2026)
+          <ul>
+            <li>Built a mobile app prototype in a 12-hour sprint to show live stock, filtering, and item hold workflows.</li>
+            <li>Added demand-responsive refill requests and restock notifications to reduce waste and improve supply data.</li>
+          </ul>
+        </li>
+        <li>
+          <strong>ARCA — Smart Sensing Camera</strong> · Directed Research (September – December 2025)
+          <ul>
+            <li>Explored tensions between security and privacy; proposed detection blurring and scheduled privacy states.</li>
+            <li>Designed UI components for identity recognition and area exclusion to increase transparency and control.</li>
+          </ul>
+        </li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Skills</h2>
+      <div class="grid">
+        <div>Figma<br>Prototyping<br>UX Research<br>Storyboarding</div>
+        <div>Python<br>Arduino IDE<br>Processing<br>VS Code / Copilot</div>
+        <div>Procreate<br>Adobe Creative Suite<br>A&amp;V Production<br>GitHub</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Languages</h2>
+      <div class="grid">
+        <div>English (Native)</div>
+        <div>Spanish (Advanced)</div>
+        <div>Chinese (Limited)</div>
+      </div>
+    </section>
+
+    <div class="actions">
+      <a href="index.html">← Back to Home</a>
+    </div>
   </div>
-  <div class="actions">
-    <a href="resume.pdf" download>Download PDF</a>
-    <a href="index.html">← Back to Home</a>
-  </div>
-  <p style="margin-top:18px;color:#666;">Note: Add your `resume.pdf` to the repository root to make this page work.</p>
 </body>
 </html>
