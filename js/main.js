@@ -3036,8 +3036,33 @@ async function startCamera() {
     const status = document.getElementById('camera-status');
     if (cameraStream) return true; // already running
     try {
+        if (!video) return false;
+        if (!navigator.mediaDevices?.getUserMedia) {
+            if (status) { status.style.display = 'block'; status.textContent = '❌ Camera API unsupported in this browser'; }
+            return false;
+        }
         if (status) { status.style.display = 'block'; status.textContent = '📷 Starting camera...'; }
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+        video.autoplay = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute('autoplay', '');
+        video.setAttribute('muted', '');
+        video.setAttribute('playsinline', '');
+        video.setAttribute('webkit-playsinline', '');
+
+        const preferredConstraints = {
+            video: {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                facingMode: 'user',
+            }
+        };
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia(preferredConstraints);
+        } catch (innerErr) {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        }
         video.srcObject = stream;
         cameraStream = stream;
         await video.play();
