@@ -2288,6 +2288,7 @@ const ENGAGE_MIN_HAND_SIZE = 0.07;
 
 let handLandmarker = null;
 let handTrackingActive = false;
+let handTrackingInitError = '';
 let isDebug = false;
 let lastGestureTime = 0;
 let currentGesture = null;
@@ -3088,9 +3089,11 @@ function stopCamera() {
 }
 
 async function initHandTracking() {
+    handTrackingInitError = '';
     try {
         const cameraOk = await startCamera();
         if (!cameraOk) {
+            handTrackingInitError = 'Camera unavailable';
             setCommandStatus('Camera unavailable — hand tracking needs a webcam');
             return;
         }
@@ -3099,22 +3102,35 @@ async function initHandTracking() {
         const vision = await FilesetResolver.forVisionTasks(
             'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
         );
-        handLandmarker = await HandLandmarker.createFromOptions(vision, {
-            baseOptions: {
-                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-                delegate: 'GPU',
-            },
+        const modelAssetPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+        const handOptions = {
             runningMode: 'VIDEO',
             numHands: 2,
             minHandDetectionConfidence: 0.6,
             minTrackingConfidence: 0.5,
-        });
+        };
+
+        try {
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { modelAssetPath, delegate: 'GPU' },
+                ...handOptions,
+            });
+        } catch (gpuErr) {
+            console.warn('GPU hand tracking unavailable, retrying with CPU delegate:', gpuErr);
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { modelAssetPath, delegate: 'CPU' },
+                ...handOptions,
+            });
+        }
 
         handTrackingActive = true;
         setCommandStatus('✋ Hand tracking active — gestures ready!');
     } catch (e) {
         console.error('Hand tracking init failed:', e);
-        setCommandStatus('Hand tracking failed: ' + (e.message || 'unknown error'));
+        handLandmarker = null;
+        handTrackingActive = false;
+        handTrackingInitError = e?.message || e?.name || 'unknown error';
+        setCommandStatus('Hand tracking failed: ' + handTrackingInitError);
     }
 }
 
@@ -5867,7 +5883,7 @@ if (handsBtn) {
                 if (db) { db.textContent = '🛠 Debug On'; db.classList.add('active'); }
             } else {
                 handsBtn.textContent = '✋ Hands On';
-                showError('Camera unavailable — check permissions');
+                showError(handTrackingInitError ? `Hand tracking failed — ${handTrackingInitError}` : 'Camera unavailable — check permissions');
             }
         } else {
             handTrackingActive = false;
