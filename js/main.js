@@ -3031,10 +3031,44 @@ function handleGestures(hands) {
 let cameraStream = null;
 let lastDetectTime = 0;
 const DETECT_INTERVAL_MS = 33; // ~30fps for hand detection
+const CAMERA_START_TIMEOUT_MS = 12000;
+const MODEL_LOAD_TIMEOUT_MS = 20000;
+
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)),
+    ]);
+}
+
+function waitForVideoReady(video, timeoutMs = 4000) {
+    if (!video) return Promise.reject(new Error('Webcam element missing'));
+    if (video.readyState >= 2) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        let done = false;
+        const finish = (err) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            video.removeEventListener('loadedmetadata', onReady);
+            video.removeEventListener('canplay', onReady);
+            video.removeEventListener('error', onError);
+            if (err) reject(err);
+            else resolve();
+        };
+        const onReady = () => finish();
+        const onError = () => finish(new Error('Unable to read camera stream'));
+        const timer = setTimeout(() => finish(new Error('Camera stream timed out')), timeoutMs);
+        video.addEventListener('loadedmetadata', onReady, { once: true });
+        video.addEventListener('canplay', onReady, { once: true });
+        video.addEventListener('error', onError, { once: true });
+    });
+}
 
 async function startCamera() {
     const video = document.getElementById('webcam');
     const status = document.getElementById('camera-status');
+    let stream = null;
     if (cameraStream) return true; // already running
     try {
         if (!video) return false;
@@ -3058,20 +3092,44 @@ async function startCamera() {
                 facingMode: 'user',
             }
         };
-        let stream;
         try {
-            stream = await navigator.mediaDevices.getUserMedia(preferredConstraints);
+            stream = await withTimeout(
+                navigator.mediaDevices.getUserMedia(preferredConstraints),
+                CAMERA_START_TIMEOUT_MS,
+                'Camera permission request timed out'
+            );
         } catch (innerErr) {
-            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            stream = await withTimeout(
+                navigator.mediaDevices.getUserMedia({ video: true }),
+                CAMERA_START_TIMEOUT_MS,
+                'Camera permission request timed out'
+            );
         }
         video.srcObject = stream;
+        await waitForVideoReady(video);
+        try {
+            await withTimeout(video.play(), 3000, 'Video playback timed out');
+        } catch (playErr) {
+            console.warn('Video play warning:', playErr);
+        }
         cameraStream = stream;
-        await video.play();
         video.classList.add('active');
         if (status) { status.textContent = '📷 Camera active'; setTimeout(() => { status.style.display = 'none'; }, 2000); }
         return true;
     } catch (e) {
         console.error('Camera failed:', e);
+        if (cameraStream) {
+            cameraStream.getTracks().forEach(t => t.stop());
+            cameraStream = null;
+        }
+        if (stream) {
+            stream.getTracks().forEach(t => t.stop());
+            stream = null;
+        }
+        if (video) {
+            video.srcObject = null;
+            video.classList.remove('active');
+        }
         if (status) { status.style.display = 'block'; status.textContent = '❌ Camera unavailable: ' + (e.message || e.name); }
         return false;
     }
@@ -3099,8 +3157,10 @@ async function initHandTracking() {
         }
 
         setCommandStatus('Loading hand tracking model...');
-        const vision = await FilesetResolver.forVisionTasks(
-            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
+        const vision = await withTimeout(
+            FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'),
+            MODEL_LOAD_TIMEOUT_MS,
+            'Hand tracking runtime load timed out'
         );
         const modelAssetPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
         const handOptions = {
@@ -3111,16 +3171,24 @@ async function initHandTracking() {
         };
 
         try {
-            handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                baseOptions: { modelAssetPath, delegate: 'GPU' },
-                ...handOptions,
-            });
+            handLandmarker = await withTimeout(
+                HandLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath, delegate: 'GPU' },
+                    ...handOptions,
+                }),
+                MODEL_LOAD_TIMEOUT_MS,
+                'Hand tracking model load timed out'
+            );
         } catch (gpuErr) {
             console.warn('GPU hand tracking unavailable, retrying with CPU delegate:', gpuErr);
-            handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                baseOptions: { modelAssetPath, delegate: 'CPU' },
-                ...handOptions,
-            });
+            handLandmarker = await withTimeout(
+                HandLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath, delegate: 'CPU' },
+                    ...handOptions,
+                }),
+                MODEL_LOAD_TIMEOUT_MS,
+                'Hand tracking model load timed out'
+            );
         }
 
         handTrackingActive = true;
